@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  通用机构骨架模板：可直接加载（nq=10, nv=9, nu=3），复制后按结构图改。
+
+  改动顺序：
+  1. 把 base / link_a / link_b 换成结构图里的名字，按层次树加删 body
+  2. 按连杆尺寸表改 geom 的 size（半尺寸）与 pos / fromto
+  3. 按关节表改 joint 的 axis 与 range
+  4. 执行器数量必须等于驱动关节数量
+  5. 关键帧 qpos = 7 个自由关节值 + 每个关节一个值，顺序按 body 深度优先遍历
+
+  场景文件另外写 scene.xml：<include file="本文件名"/> + <option> + 地面 + 灯光 + 相机。
+  注意 compiler 只能出现在本文件里，scene.xml 不要再写。
+-->
+<mujoco model="mechanism_template">
+  <compiler angle="radian" autolimits="true"/>
+
+  <worldbody>
+    <body name="base" pos="0 0 0">
+      <freejoint name="root"/>
+      <geom name="base_geom" type="box" size="0.06 0.09 0.02" pos="0 0 0"
+            density="800" rgba="0.55 0.58 0.64 1"
+            friction="0.9 0.02 0.001" contype="2" conaffinity="1"/>
+
+      <!-- ========== 支链 A：两个串联旋转关节 ========== -->
+      <body name="link_a" pos="0 0.08 0">
+        <joint name="joint_a1" type="hinge" axis="0 -1 0"
+               range="-1.57 1.57" limited="true"
+               armature="0.005" damping="0.05" frictionloss="0.02"/>
+        <geom name="link_a_geom" type="capsule" fromto="0 0 0 0 0 -0.12"
+              size="0.015" density="800" rgba="0.72 0.75 0.80 1"
+              friction="0.9 0.02 0.001" contype="2" conaffinity="1"/>
+
+        <body name="link_a2" pos="0 0 -0.12">
+          <joint name="joint_a2" type="hinge" axis="0 -1 0"
+                 range="-1.57 1.57" limited="true"
+                 armature="0.005" damping="0.05" frictionloss="0.02"/>
+          <geom name="link_a2_geom" type="capsule" fromto="0 0 0 0 0 -0.10"
+                size="0.012" density="800" rgba="0.72 0.75 0.80 1"
+                friction="0.9 0.02 0.001" contype="2" conaffinity="1"/>
+          <!-- 接触件：只有它参与和地板的接触，掩码 1/1 -->
+          <geom name="foot_geom_a" type="sphere" size="0.018" pos="0 0 -0.10"
+                density="800" rgba="0.20 0.24 0.30 1"
+                friction="1.2 0.02 0.001" contype="1" conaffinity="1"/>
+        </body>
+      </body>
+
+      <!-- ========== 支链 B：单关节 ========== -->
+      <body name="link_b" pos="0 -0.08 0">
+        <joint name="joint_b1" type="hinge" axis="1 0 0"
+               range="-0.60 0.60" limited="true"
+               armature="0.005" damping="0.05" frictionloss="0.02"/>
+        <geom name="link_b_geom" type="capsule" fromto="0 0 0 0 0 -0.22"
+              size="0.015" density="800" rgba="0.72 0.75 0.80 1"
+              friction="0.9 0.02 0.001" contype="2" conaffinity="1"/>
+        <geom name="foot_geom_b" type="sphere" size="0.018" pos="0 0 -0.22"
+              density="800" rgba="0.20 0.24 0.30 1"
+              friction="1.2 0.02 0.001" contype="1" conaffinity="1"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <position name="act_joint_a1" joint="joint_a1" kp="25" kv="1"
+              forcerange="-2.5 2.5" forcelimited="true"
+              inheritrange="1" ctrllimited="true"/>
+    <position name="act_joint_a2" joint="joint_a2" kp="25" kv="1"
+              forcerange="-2.5 2.5" forcelimited="true"
+              inheritrange="1" ctrllimited="true"/>
+    <position name="act_joint_b1" joint="joint_b1" kp="25" kv="1"
+              forcerange="-2.5 2.5" forcelimited="true"
+              inheritrange="1" ctrllimited="true"/>
+  </actuator>
+
+  <!-- qpos = x y z | qw qx qy qz | joint_a1 joint_a2 joint_b1 -->
+  <!-- 0.238 = 两条支链从基座到接地点的高度，保证接触件刚好落在 z=0 -->
+  <keyframe>
+    <key name="stand"
+         qpos="0 0 0.238 1 0 0 0 0 0 0"
+         ctrl="0 0 0"/>
+  </keyframe>
+</mujoco>

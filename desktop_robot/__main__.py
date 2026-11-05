@@ -40,6 +40,47 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_dino(args: argparse.Namespace) -> int:
+    from .dino import DEFAULT_DINO_SPEC, summary as dino_summary, write_dino_models  # noqa: PLC0415
+
+    out = Path(args.out)
+    paths = write_dino_models(DEFAULT_DINO_SPEC, out)
+    print(f"已生成 {dino_summary(DEFAULT_DINO_SPEC)}")
+    for path in paths:
+        print(f"  → {path}")
+    return 0
+
+
+def cmd_verify_dino(args: argparse.Namespace) -> int:
+    from .dino import DEFAULT_DINO_SPEC, verify_dino_static  # noqa: PLC0415
+
+    report = verify_dino_static(DEFAULT_DINO_SPEC, args.models)
+    print(f"恐龙模型静态校验: {'通过' if report.ok else '失败'}")
+    _print_report(report)
+    if not report.ok:
+        return 1
+
+    if not args.dynamic:
+        print("  （未指定 --dynamic，跳过 MuJoCo 动态校验）")
+        return 0
+
+    from . import sim  # noqa: PLC0415
+
+    if not sim.has_mujoco():
+        print("跳过动态校验：当前解释器没有安装 mujoco", file=sys.stderr)
+        return 0
+
+    print("动态校验（MuJoCo）:")
+    result = sim.dynamic_check(Path(args.models) / "dino_scene.xml", steps=args.steps)
+    for key in ("nq", "nv", "nu", "nbody", "z_start", "z_end", "z_drift"):
+        print(f"  {key}: {result[key]:.4f}")
+    problems = result.get("problems") or []
+    for problem in problems:
+        print(f"  [错误] {problem}", file=sys.stderr)
+    print(f"  → {'通过' if not problems else '失败'}")
+    return 0 if not problems else 1
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     report = verify_static(DEFAULT_SPEC, args.models)
     print(f"静态校验: {'通过' if report.ok else '失败'}")
@@ -96,13 +137,19 @@ def cmd_simulate(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m desktop_robot",
-        description="桌面双足机器人的参数化 MuJoCo 模型工具",
+        description="桌面机器人的参数化 MuJoCo 模型工具（双足 biped / 恐龙 dino）",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_build = sub.add_parser("build", help="根据 config.py 生成 models/*.xml")
+    p_build = sub.add_parser("build", help="根据 config.py 生成 models/biped.xml 与 scene.xml")
     p_build.add_argument("--out", default=str(MODELS_DIR), help="输出目录（默认 models/）")
     p_build.set_defaults(func=cmd_build)
+
+    p_build_dino = sub.add_parser(
+        "build-dino", help="根据 dino.py 生成 models/dino.xml 与 dino_scene.xml"
+    )
+    p_build_dino.add_argument("--out", default=str(MODELS_DIR), help="输出目录（默认 models/）")
+    p_build_dino.set_defaults(func=cmd_build_dino)
 
     p_verify = sub.add_parser("verify", help="校验生成物与参数源是否一致")
     p_verify.add_argument("--models", default=str(MODELS_DIR), help="模型目录")
@@ -110,17 +157,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--steps", type=int, default=1000, help="动态校验步数")
     p_verify.set_defaults(func=cmd_verify)
 
+    p_verify_dino = sub.add_parser("verify-dino", help="校验恐龙模型与参数源是否一致")
+    p_verify_dino.add_argument("--models", default=str(MODELS_DIR), help="模型目录")
+    p_verify_dino.add_argument(
+        "--dynamic", action="store_true", help="额外用 MuJoCo 加载并试跑"
+    )
+    p_verify_dino.add_argument("--steps", type=int, default=1000, help="动态校验步数")
+    p_verify_dino.set_defaults(func=cmd_verify_dino)
+
     p_view = sub.add_parser("view", help="打开 MuJoCo 查看器")
     p_view.add_argument("--models", default=str(MODELS_DIR), help="模型目录")
     p_view.add_argument(
-        "--model", default="scene", choices=("scene", "biped"), help="要打开的模型文件"
+        "--model",
+        default="scene",
+        choices=("scene", "biped", "dino_scene", "dino"),
+        help="要打开的模型文件",
     )
     p_view.set_defaults(func=cmd_view)
 
     p_sim = sub.add_parser("simulate", help="无头仿真，保持站姿并输出基座高度")
     p_sim.add_argument("--models", default=str(MODELS_DIR), help="模型目录")
     p_sim.add_argument(
-        "--model", default="scene", choices=("scene", "biped"), help="要仿真的模型文件"
+        "--model",
+        default="scene",
+        choices=("scene", "biped", "dino_scene", "dino"),
+        help="要仿真的模型文件",
     )
     p_sim.add_argument("--steps", type=int, default=2000, help="仿真步数")
     p_sim.set_defaults(func=cmd_simulate)

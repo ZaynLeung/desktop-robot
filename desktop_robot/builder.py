@@ -250,9 +250,24 @@ def build_robot(spec: RobotSpec = DEFAULT_SPEC) -> ET.Element:
 
 
 def build_scene(spec: RobotSpec = DEFAULT_SPEC) -> ET.Element:
-    """构造带地面、灯光、相机的场景，机器人通过 ``<include>`` 引入。"""
-    root = ET.Element("mujoco", {"model": f"{spec.name}_scene"})
-    ET.SubElement(root, "include", {"file": "biped.xml"})
+    """构造双足机器人的场景：本体通过 ``<include file="biped.xml"/>`` 引入。"""
+    return build_scene_for("biped.xml", f"{spec.name}_scene")
+
+
+def build_scene_for(
+    include_file: str,
+    model_name: str,
+    *,
+    statistic_center: str = "0 0 0.16",
+    statistic_extent: str = "0.4",
+) -> ET.Element:
+    """构造通用场景：``include_file`` 引入机器人本体，外面套地面/灯光/相机。
+
+    双足机型和恐龙机型共用这一段；差别只在被 include 的文件名与
+    ``<statistic>`` 的取景范围（恐龙带尾巴，模型在 x 方向更长）。
+    """
+    root = ET.Element("mujoco", {"model": model_name})
+    ET.SubElement(root, "include", {"file": include_file})
     # 求解器设置放在场景里：机器人本体保持一个"纯模型"，可以单独加载。
     ET.SubElement(
         root,
@@ -265,7 +280,7 @@ def build_scene(spec: RobotSpec = DEFAULT_SPEC) -> ET.Element:
             "gravity": "0 0 -9.81",
         },
     )
-    ET.SubElement(root, "statistic", {"center": "0 0 0.16", "extent": "0.4"})
+    ET.SubElement(root, "statistic", {"center": statistic_center, "extent": statistic_extent})
 
     # 纯内建纹理（builtin），不引入任何外部图片文件，仓库仍然没有二进制资产
     asset = ET.SubElement(root, "asset")

@@ -8,7 +8,7 @@ EESM 5800「桌面伴侣机器人」课程项目的仿真工程。
 | 机型 | 造型 | 驱动关节 | 站立高度 | 总质量 | `nq / nv / nu` | 模型文件 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `desktop_biped` | 腰部 + 双足 | 9 | ≈ 0.310 m | ≈ 1.51 kg | 16 / 15 / 9 | `models/biped.xml` |
-| `desktop_dino` | 霸王龙（头 + 双臂 + 双足 + 两节尾） | 11 | ≈ 0.353 m | ≈ 2.38 kg | 18 / 17 / 11 | `models/dino.xml` |
+| `desktop_dino` | 霸王龙（头 + 双臂 + 双足 + 4 节尾） | 16 | ≈ 0.377 m | ≈ 4.20 kg | 23 / 22 / 16 | `models/dino.xml` |
 
 设计细节、坐标约定、简化假设见：
 **双足** → [`docs/model_design.md`](docs/model_design.md)；
@@ -80,7 +80,7 @@ desktop/
 ├─ models/                   生成物，提交入库（没有 Python 也能直接导入 MuJoCo）
 │  ├─ biped.xml              双足本体（8 body / 9 关节 / 9 执行器 / stand 关键帧）
 │  ├─ scene.xml              include biped.xml + 地面 + 天空盒 + 灯光 + 两个机位 + 求解器设置
-│  ├─ dino.xml               恐龙本体（12 body / 11 关节 / 11 执行器 / stand 关键帧）
+│  ├─ dino.xml               恐龙本体（14 body / 16 关节 / 16 执行器 / stand 关键帧）
 │  └─ dino_scene.xml         include dino.xml + 地面 + 灯光 + front / iso / ref 三个机位
 │
 ├─ tests/                    pytest
@@ -133,17 +133,17 @@ pelvis ──waist_yaw───────────────────�
 
 ```
 torso（浮动基座）
-├─ head     ① neck_pitch              躯干抬头 20°，头再低头 0.25 rad
-├─ arm_L/R  ②③ shoulder_pitch_L/R     单段小手臂
-├─ thigh_L/R ④⑤ hip_pitch_L/R
-│  └─ shank  ⑥⑦ knee_L/R
-│     └─ foot ⑧⑨ ankle_L/R            前趾深灰，和足底一起接触地面
-└─ tail_1   ⑩ tail1_pitch → tail_2 ⑪ tail2_pitch
+├─ head     ① neck_pitch（上下）→ ② neck_yaw（左右，轴 z）
+├─ arm_L/R  ③④ shoulder_pitch_L/R      单段小手臂
+├─ thigh_L/R ⑤⑦ hip_pitch_L/R（主髋）→ ⑥⑧ hip_roll_L/R（内外翻，轴 x）
+│  └─ shank  ⑨⑩ knee_L/R
+│     └─ foot ⑪⑫ ankle_L/R             前趾深灰，和足底一起接触地面
+└─ tail_1   ⑬ tail1_yaw → tail_2 ⑭ tail2_pitch → tail_3 ⑮ tail3_yaw → tail_4 ⑯ tail4_pitch
 ```
 
-* 11 个关节全是俯仰，**完全平面机构**（不能转身、不能侧向平衡）。
+* 16 个关节 = 俯仰 10 + 偏航 3（头、尾 1、尾 3）+ 内外翻 2；躯干/髋没有 yaw，仍不能原地转身。
 * 足底水平判据：`base_pitch + 髋 + 膝 + 踝 = 0`，站姿里踝角由生成器自动反解。
-* 标称站姿 `stand`：基座高 `0.2301 m`，站高 `0.353 m`；每个 link 的长度都在
+* 标称站姿 `stand`：基座高 `0.2541 m`，站高 `0.377 m`；每个 link 的长度都在
   [`dino.py`](desktop_robot/dino.py) 的 `*_size` 里，改长度会自动带动下游关节。
 
 ---
@@ -202,7 +202,7 @@ python -m pytest tests/test_dino.py tests/test_dino_mujoco.py
 * 逆运动学与步态生成（`kinematics.py` 已有雅可比，可以直接接；恐龙的站姿反解在 `dino.py`）
 * Gymnasium 环境封装（`gymnasium[mujoco]` 已装好，模型可直接注册为环境）
 * 强化学习训练（按需 `pip install stable-baselines3`，torch 体积较大所以没预装）
-* 恐龙的髋/肩侧摆自由度：现在是纯平面机构，加 roll 轴后可以做转身和侧向平衡
+* 恐龙的侧向自由度：髋内外翻、头 yaw、尾 yaw 已加；还缺腰 yaw，补上后可以做原地转身和侧向平衡
 * 硬件设计定稿后按实测尺寸替换 `*_size`，重新生成模型即可
 
 ---

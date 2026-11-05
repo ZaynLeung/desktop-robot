@@ -1,22 +1,24 @@
-"""桌面恐龙（T-rex 造型）机器人的参数化 MuJoCo 模型生成器。
+﻿"""桌面恐龙（T-rex 造型）机器人的参数化 MuJoCo 模型生成器。
 
 参数源在 :class:`DinoSpec` / :data:`DEFAULT_DINO_SPEC`，模型文件
 ``models/dino.xml`` 与 ``models/dino_scene.xml`` 是它的确定性生成物。
 
-拓扑（11 个驱动关节，全部是矢状面俯仰）：::
+拓扑（16 个驱动关节：俯仰 pitch / 偏航 yaw / 内外翻 roll）：::
 
     torso（浮动基座，freejoint: root）
-    ├─ head          neck_pitch            ① 颈
-    ├─ arm_L         shoulder_pitch_L      ② 左肩
-    ├─ arm_R         shoulder_pitch_R      ③ 右肩
-    ├─ thigh_L       hip_pitch_L           ④ 左髋
-    │  └─ shank_L    knee_L                ⑥ 左膝
-    │     └─ foot_L  ankle_L               ⑧ 左踝
-    ├─ thigh_R       hip_pitch_R           ⑤ 右髋
-    │  └─ shank_R    knee_R                ⑦ 右膝
-    │     └─ foot_R  ankle_R               ⑨ 右踝
-    └─ tail_1        tail1_pitch           ⑩ 尾部第 1 节
-       └─ tail_2     tail2_pitch           ⑪ 尾部第 2 节
+    ├─ head          neck_pitch ①（上下） → neck_yaw ②（左右，轴 z）
+    ├─ arm_L         shoulder_pitch_L ③（上下）
+    ├─ arm_R         shoulder_pitch_R ④（上下）
+    ├─ thigh_L       hip_pitch_L ⑤（主髋，上下） → hip_roll_L ⑥（内外翻，轴 x）
+    │  └─ shank_L    knee_L ⑨
+    │     └─ foot_L  ankle_L ⑪
+    ├─ thigh_R       hip_pitch_R ⑦ → hip_roll_R ⑧
+    │  └─ shank_R    knee_R ⑩
+    │     └─ foot_R  ankle_R ⑫
+    └─ tail_1        tail1_yaw ⑬（侧向，轴 z）
+       └─ tail_2     tail2_pitch ⑭（上下）
+          └─ tail_3  tail3_yaw ⑮（侧向，轴 z）
+             └─ tail_4 tail4_pitch ⑯（上下）
 
 **每个连杆的长度都由对应 ``*_size`` 的相应分量决定**，改长度后关节/几何偏移
 会自动跟着重算，不需要手工同步：
@@ -27,19 +29,24 @@
 ``thigh``                      ``thigh_size[2]``（膝关节在 z = −大腿长）
 ``shank``                      ``shank_size[2]``（踝关节在 z = −小腿长）
 ``arm``                        ``arm_size[2]``（臂几何中心在 z = −臂长/2）
-``tail_1`` / ``tail_2``        ``tail1_size[0]`` / ``tail2_size[0]``
+``tail_1`` … ``tail_4``        ``tail1_size[0]`` … ``tail4_size[0]``
 ``foot`` / ``toe``             足 box 中心 ``foot_center``；前趾贴住足前端与足底
 ============================  ==========================================
 
 躯干上的锚点（``neck_pos`` / ``shoulder_pos`` / ``hip_pos`` / ``tail1_pos``）
 是显式字段：想改「关节在躯干上的位置」直接改这些偏移即可。
 
-约定与仓库里的双足模型一致：x 前 / y 左 / z 上；俯仰轴统一 ``(0, -1, 0)``，
-正角 = 子连杆向前摆（对朝后的尾巴，正角 = 尾尖下压）。标称站姿里躯干抬头
-``base_pitch``，踝关节按「基座俯仰 + 髋 + 膝 + 踝 = 0」反解，保证足底水平。
+坐标与轴向：x 前 / y 左 / z 上。
 
-模型的**零位就是标称站姿**：躯干 body 的 ``pos`` / ``quat`` 是站姿的基座高度与
-抬头角，其余每个 body 的 ``quat`` 是它自己那个关节的站姿角（髋/膝/踝/颈/肩/尾）。
+* 俯仰（上下）：轴 ``(0, -1, 0)``，正角 = 子连杆向前摆；对朝后的尾巴，正角 = 尾尖下压。
+* 偏航（左右）：轴 ``(0, 0, 1)``，正角 = 从上往下看逆时针（头部向左、尾尖向右）。
+* 内外翻：左腿轴 ``(1, 0, 0)``、右腿轴 ``(-1, 0, 0)``，两腿正角都表示外翻。
+
+轴写在关节所在 body 的局部坐标系里，会随上游关节一起转；同一个 body 里多个关节
+按定义顺序复合，所以「髋 pitch → 内外翻 roll」「头 pitch → yaw」都按这副顺序生效。
+
+模型的**零位就是标称站姿**：每个 body 的 ``quat`` 烘了它所有关节的站姿角
+（颈/肩/髋/膝/踝/尾），躯干 body 的 ``pos`` / ``quat`` 是站姿的基座高度与抬头角。
 于是 ``qpos`` 全 0 时模型正好是标称站姿、脚底落在 z=0：``dino.xml`` /
 ``dino_scene.xml`` 一加载就站在地面上，不依赖"先套 stand 关键帧"。``stand``
 关键帧仍然保留（关节角全 0、``ctrl`` 全 0），用于 ``mj_resetDataKeyframe`` 复位；
@@ -61,8 +68,13 @@ from .builder import MODELS_DIR, build_scene_for, fnum, half, vec
 from .config import JointSpec, Vec3, joint_name
 from .verifier import Report
 
-#: 俯仰轴。与双足模型一致：正角 = 子连杆向前摆。
+#: 俯仰轴（上下）。与双足模型一致：正角 = 子连杆向前摆。
 PITCH: Vec3 = (0.0, -1.0, 0.0)
+#: 偏航轴（左右，从上往下看逆时针为正）。
+YAW: Vec3 = (0.0, 0.0, 1.0)
+#: 内外翻轴（前后方向）；右腿在 :meth:`JointSpec.axis_for` 里把 x 取反，
+#: 于是两腿正角都表示外翻。
+ROLL: Vec3 = (1.0, 0.0, 0.0)
 
 #: 生成 XML 的表头（告诉读者这是生成物、去哪里改参数）。
 _HEADER = """<?xml version="1.0" encoding="utf-8"?>
@@ -76,29 +88,41 @@ _GREEN_LIMB = "0.24 0.47 0.20 1"
 _TOE = "0.12 0.12 0.13 1"
 _GREY = "0.55 0.56 0.58 1"
 
-#: 关节轴承外壳（只做视觉，不参与质量和碰撞）：关节名 → (半径, 半长)。
+#: 关节轴承外壳（只做视觉，不参与质量和碰撞）：关节基名 → (半径, 半长)。
 #: 参考图里每个铰链都有一圈灰色轴承，加上它渲染出来才像那台机器人。
 _CAPS: dict[str, tuple[float, float]] = {
     "neck_pitch": (0.016, 0.024),
+    "neck_yaw": (0.014, 0.020),
     "shoulder_pitch": (0.014, 0.019),
     "hip_pitch": (0.016, 0.024),
+    "hip_roll": (0.015, 0.022),
     "knee": (0.014, 0.021),
     "ankle": (0.012, 0.017),
-    "tail1_pitch": (0.012, 0.017),
-    "tail2_pitch": (0.011, 0.015),
+    "tail1_yaw": (0.012, 0.018),
+    "tail2_pitch": (0.011, 0.016),
+    "tail3_yaw": (0.010, 0.014),
+    "tail4_pitch": (0.009, 0.012),
 }
 
 
 def _joint(
     name: str,
     rng: tuple[float, float],
+    axis: Vec3 = PITCH,
     kp: float = 25.0,
     kv: float = 1.0,
     forcerange: float = 2.5,
+    mirror_x: bool = False,
 ) -> JointSpec:
-    """构造一个单轴俯仰关节（轴固定为 ``(0, -1, 0)``）。"""
+    """构造一个单轴铰链；默认是俯仰轴，可换成 yaw / roll。"""
     return JointSpec(
-        name=name, axis=PITCH, range=rng, kp=kp, kv=kv, forcerange=forcerange
+        name=name,
+        axis=axis,
+        range=rng,
+        kp=kp,
+        kv=kv,
+        forcerange=forcerange,
+        mirror_x=mirror_x,
     )
 
 
@@ -125,8 +149,8 @@ class DinoSpec:
     shoulder_pos: Vec3 = (0.048, 0.058, 0.018)  # y 为左肩；右肩取反
 
     # ---- 腿 ----
-    thigh_size: Vec3 = (0.048, 0.040, 0.090)
-    shank_size: Vec3 = (0.044, 0.036, 0.075)
+    thigh_size: Vec3 = (0.048, 0.040, 0.050)
+    shank_size: Vec3 = (0.044, 0.036, 0.045)
     foot_size: Vec3 = (0.085, 0.055, 0.032)
     toe_size: Vec3 = (0.028, 0.018, 0.026)
     hip_pos: Vec3 = (-0.085, 0.045, -0.030)
@@ -134,33 +158,58 @@ class DinoSpec:
     toe_y: float = 0.013  # 两个前趾中心相对足中线（旋转方向镜像 ±）
     toe_overlap: float = 0.006  # 前趾与足 box 在 x 方向的重叠量
 
-    # ---- 尾巴 ----
-    tail1_size: Vec3 = (0.085, 0.042, 0.036)
-    tail2_size: Vec3 = (0.080, 0.036, 0.030)
+    # ---- 尾巴：4 节，长度/截面都在这里改 ----
+    tail1_size: Vec3 = (0.080, 0.070, 0.086)
+    tail2_size: Vec3 = (0.075, 0.065, 0.074)
+    tail3_size: Vec3 = (0.070, 0.061, 0.062)
+    tail4_size: Vec3 = (0.060, 0.056, 0.050)
     tail1_pos: Vec3 = (-0.068, 0.0, -0.020)
 
     # ---- 关节 ----
     neck: JointSpec = field(default_factory=lambda: _joint("neck_pitch", (-0.70, 0.70)))
+    neck_yaw: JointSpec = field(
+        default_factory=lambda: _joint("neck_yaw", (-0.60, 0.60), axis=YAW)
+    )
     shoulder: JointSpec = field(
         default_factory=lambda: _joint("shoulder_pitch", (-1.20, 1.20))
     )
     hip: JointSpec = field(default_factory=lambda: _joint("hip_pitch", (-1.20, 1.20)))
+    hip_roll: JointSpec = field(
+        default_factory=lambda: _joint(
+            "hip_roll", (-0.35, 0.35), axis=ROLL, mirror_x=True
+        )
+    )
     knee: JointSpec = field(default_factory=lambda: _joint("knee", (-1.60, 0.05)))
     ankle: JointSpec = field(
         default_factory=lambda: _joint("ankle", (-0.60, 0.80), forcerange=2.0)
     )
-    tail1: JointSpec = field(default_factory=lambda: _joint("tail1_pitch", (-0.80, 0.80)))
-    tail2: JointSpec = field(default_factory=lambda: _joint("tail2_pitch", (-0.80, 0.80)))
+    tail1_yaw: JointSpec = field(
+        default_factory=lambda: _joint("tail1_yaw", (-0.50, 0.50), axis=YAW)
+    )
+    tail2_pitch: JointSpec = field(
+        default_factory=lambda: _joint("tail2_pitch", (-0.80, 0.50))
+    )
+    tail3_yaw: JointSpec = field(
+        default_factory=lambda: _joint("tail3_yaw", (-0.50, 0.50), axis=YAW)
+    )
+    tail4_pitch: JointSpec = field(
+        default_factory=lambda: _joint("tail4_pitch", (-0.80, 0.50))
+    )
 
     # ---- 标称站姿（弧度）----
     # 躯干抬头 base_pitch；踝角由「足底水平」判据反解，保证脚掌贴地。
+    # 新增的 yaw / roll 关节站姿角都是 0：零位即站姿的写法下它们不需要平移范围。
     base_pitch: float = math.radians(20.0)
     stand_neck: float = -0.25
+    stand_neck_yaw: float = 0.0
     stand_shoulder: float = -0.15
     stand_hip: float = -0.30
+    stand_hip_roll: float = 0.0
     stand_knee: float = -0.10
-    stand_tail1: float = 0.20
-    stand_tail2: float = 0.12
+    stand_tail1_yaw: float = 0.0
+    stand_tail2_pitch: float = 0.18
+    stand_tail3_yaw: float = 0.0
+    stand_tail4_pitch: float = 0.14
 
     density: float = 800.0
 
@@ -188,6 +237,14 @@ class DinoSpec:
         return self.tail2_size[0]
 
     @property
+    def tail3_len(self) -> float:
+        return self.tail3_size[0]
+
+    @property
+    def tail4_len(self) -> float:
+        return self.tail4_size[0]
+
+    @property
     def toe_center(self) -> Vec3:
         """前趾几何中心相对踝关节（y 由 ``±toe_y`` 给出，这里写 0）。"""
         x = (
@@ -211,20 +268,25 @@ class DinoSpec:
         """按 MuJoCo qpos 顺序返回 (关节参数, 侧别)。
 
         顺序 = body 深度优先遍历 + body 内关节定义顺序：
-        颈 → 左肩 → 右肩 → 左腿 3 个 → 右腿 3 个 → 尾 2 个。
+        颈 pitch → 颈 yaw → 左肩 → 右肩 → 左腿 4 个 → 右腿 4 个 → 尾 4 个。
         """
         return [
             (self.neck, None),
+            (self.neck_yaw, None),
             (self.shoulder, "L"),
             (self.shoulder, "R"),
             (self.hip, "L"),
+            (self.hip_roll, "L"),
             (self.knee, "L"),
             (self.ankle, "L"),
             (self.hip, "R"),
+            (self.hip_roll, "R"),
             (self.knee, "R"),
             (self.ankle, "R"),
-            (self.tail1, None),
-            (self.tail2, None),
+            (self.tail1_yaw, None),
+            (self.tail2_pitch, None),
+            (self.tail3_yaw, None),
+            (self.tail4_pitch, None),
         ]
 
     @property
@@ -245,8 +307,8 @@ class DinoSpec:
 
     @property
     def n_bodies(self) -> int:
-        """躯干 1 + 头 1 + 臂 2 + 每腿 3 ×2 + 尾 2。"""
-        return 1 + 1 + 2 + 2 * 3 + 2
+        """躯干 1 + 头 1 + 臂 2 + 每腿 3 ×2 + 尾 4。"""
+        return 1 + 1 + 2 + 2 * 3 + 4
 
     @property
     def body_geoms(self) -> tuple[tuple[str, Vec3, float], ...]:
@@ -268,6 +330,8 @@ class DinoSpec:
             ("toe", self.toe_size, self.density),
             ("tail_1", self.tail1_size, self.density),
             ("tail_2", self.tail2_size, self.density),
+            ("tail_3", self.tail3_size, self.density),
+            ("tail_4", self.tail4_size, self.density),
         ]
         return tuple(geoms)
 
@@ -282,14 +346,20 @@ class DinoSpec:
     # ------------------------------------------------------------------
     def stand_q(self) -> dict[str, float]:
         """标称站姿的「关节名 → 角度」字典。"""
-        q: dict[str, float] = {"neck_pitch": self.stand_neck}
+        q: dict[str, float] = {
+            "neck_pitch": self.stand_neck,
+            "neck_yaw": self.stand_neck_yaw,
+            "tail1_yaw": self.stand_tail1_yaw,
+            "tail2_pitch": self.stand_tail2_pitch,
+            "tail3_yaw": self.stand_tail3_yaw,
+            "tail4_pitch": self.stand_tail4_pitch,
+        }
         for side in ("L", "R"):
             q[f"shoulder_pitch_{side}"] = self.stand_shoulder
             q[f"hip_pitch_{side}"] = self.stand_hip
+            q[f"hip_roll_{side}"] = self.stand_hip_roll
             q[f"knee_{side}"] = self.stand_knee
             q[f"ankle_{side}"] = self.stand_ankle
-        q["tail1_pitch"] = self.stand_tail1
-        q["tail2_pitch"] = self.stand_tail2
         return q
 
 
@@ -389,9 +459,37 @@ def base_quat(spec: DinoSpec) -> tuple[float, float, float, float]:
     return pitch_quat(spec.base_pitch)
 
 
-def _body_quat(angle: float) -> str:
-    """body 的静止姿态：把关节的站姿角烘进 ``quat``，使 qpos=0 时就是站姿。"""
-    return vec(pitch_quat(angle))
+def _axis_quat(axis: Vec3, angle: float) -> tuple[float, float, float, float]:
+    """绕任意轴转 ``angle`` 的四元数（MJCF 的 ``(w, x, y, z)``）。"""
+    norm = math.sqrt(axis[0] ** 2 + axis[1] ** 2 + axis[2] ** 2)
+    s = math.sin(angle / 2.0) / norm
+    return (math.cos(angle / 2.0), axis[0] * s, axis[1] * s, axis[2] * s)
+
+
+def _quat_mul(
+    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    """四元数乘法：``a * b`` 对应先转 ``b`` 再转 ``a`` 的旋转矩阵 ``R(a) R(b)``。"""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def _body_quat(*axis_angles: tuple[Vec3, float]) -> str:
+    """body 的静止姿态：把该 body 上所有关节的站姿旋转按定义顺序乘起来。
+
+    ``axis`` 传该关节实际生效的轴（右腿内外翻要传镜像后的轴），
+    这样 ``qpos=0`` 时模型正好是标称站姿。
+    """
+    quat: tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
+    for axis, angle in axis_angles:
+        quat = _quat_mul(quat, _axis_quat(axis, angle))
+    return vec(quat)
 
 
 def stand_qpos(spec: DinoSpec) -> list[float]:
@@ -489,18 +587,23 @@ def _cap_attributes(joint: JointSpec, side: str | None) -> dict[str, str] | None
     if dims is None:
         return None
     radius, half_len = dims
-    return {
+    attrs = {
         "name": f"cap_{joint_name(joint, side)}",
         "type": "cylinder",
         "size": f"{fnum(radius)} {fnum(half_len)}",
         "pos": "0 0 0",
-        # 圆柱默认沿 z 轴，转 90° 到 y 轴，和俯仰轴一致
-        "quat": "0.7071068 0.7071068 0 0",
         "rgba": _GREY,
         "density": "0",
         "contype": "0",
         "conaffinity": "0",
     }
+    # 圆柱默认沿 z 轴；按关节轴把它转到 y（俯仰）或 x（内外翻），偏航沿用 z。
+    axis = joint.axis_for(side)
+    if abs(axis[1]) > 0.5:
+        attrs["quat"] = "0.7071068 0.7071068 0 0"
+    elif abs(axis[2]) < 0.5:
+        attrs["quat"] = "0.7071068 0 0.7071068 0"
+    return attrs
 
 
 def _add_joint(
@@ -516,16 +619,25 @@ def _add_joint(
 def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
     """挂一条腿：thigh → shank → foot（foot 上再挂两个前趾）。
 
-    每个 body 的 ``quat`` 写成它自己那个关节的站姿角，所以 qpos 全 0 时这条腿正好
-    是标称站姿（髋/膝/踝 = ``stand_hip`` / ``stand_knee`` / ``stand_ankle``）。
+    thigh body 上有两个关节，按「主髋 pitch → 内外翻 roll」的顺序；
+    body 的 ``quat`` 烘的是这两个关节的站姿旋转，所以 qpos 全 0 时这条腿正好
+    是标称站姿（髋 pitch = ``stand_hip``、内外翻 = ``stand_hip_roll``）。
     """
     hip = (spec.hip_pos[0], sign * spec.hip_pos[1], spec.hip_pos[2])
     thigh = ET.SubElement(
         torso,
         "body",
-        {"name": f"thigh_{side}", "pos": vec(hip), "quat": _body_quat(spec.stand_hip)},
+        {
+            "name": f"thigh_{side}",
+            "pos": vec(hip),
+            "quat": _body_quat(
+                (spec.hip.axis_for(side), spec.stand_hip),
+                (spec.hip_roll.axis_for(side), spec.stand_hip_roll),
+            ),
+        },
     )
     _add_joint(thigh, spec.hip, side, spec)
+    _add_joint(thigh, spec.hip_roll, side, spec)
     ET.SubElement(
         thigh,
         "geom",
@@ -546,7 +658,7 @@ def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
         {
             "name": f"shank_{side}",
             "pos": vec((0.0, 0.0, -spec.thigh_len)),
-            "quat": _body_quat(spec.stand_knee),
+            "quat": _body_quat((spec.knee.axis_for(side), spec.stand_knee)),
         },
     )
     _add_joint(shank, spec.knee, side, spec)
@@ -570,7 +682,7 @@ def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
         {
             "name": f"foot_{side}",
             "pos": vec((0.0, 0.0, -spec.shank_len)),
-            "quat": _body_quat(spec.stand_ankle),
+            "quat": _body_quat((spec.ankle.axis_for(side), spec.stand_ankle)),
         },
     )
     _add_joint(foot, spec.ankle, side, spec)
@@ -638,17 +750,21 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
         ),
     )
 
-    # ---- 头：颈关节在躯干上前方，头几何再向前上方偏一段 ----
+    # ---- 头：颈 pitch → 颈 yaw，头几何再向前上方偏一段 ----
     head = ET.SubElement(
         torso,
         "body",
         {
             "name": "head",
             "pos": vec(spec.neck_pos),
-            "quat": _body_quat(spec.stand_neck),
+            "quat": _body_quat(
+                (spec.neck.axis, spec.stand_neck),
+                (spec.neck_yaw.axis, spec.stand_neck_yaw),
+            ),
         },
     )
     _add_joint(head, spec.neck, None, spec)
+    _add_joint(head, spec.neck_yaw, None, spec)
     ET.SubElement(
         head,
         "geom",
@@ -676,7 +792,9 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
             {
                 "name": f"arm_{side}",
                 "pos": vec(shoulder),
-                "quat": _body_quat(spec.stand_shoulder),
+                "quat": _body_quat(
+                    (spec.shoulder.axis_for(side), spec.stand_shoulder)
+                ),
             },
         )
         _add_joint(arm, spec.shoulder, side, spec)
@@ -698,17 +816,17 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     _add_leg(torso, spec, "L", 1.0)
     _add_leg(torso, spec, "R", -1.0)
 
-    # ---- 尾巴：两节，沿 −x 向后伸 ----
+    # ---- 尾巴：4 节，沿 −x 向后伸；关节依次 yaw → pitch → yaw → pitch ----
     tail1 = ET.SubElement(
         torso,
         "body",
         {
             "name": "tail_1",
             "pos": vec(spec.tail1_pos),
-            "quat": _body_quat(spec.stand_tail1),
+            "quat": _body_quat((spec.tail1_yaw.axis, spec.stand_tail1_yaw)),
         },
     )
-    _add_joint(tail1, spec.tail1, None, spec)
+    _add_joint(tail1, spec.tail1_yaw, None, spec)
     ET.SubElement(
         tail1,
         "geom",
@@ -729,10 +847,10 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
         {
             "name": "tail_2",
             "pos": vec((-spec.tail1_len, 0.0, 0.0)),
-            "quat": _body_quat(spec.stand_tail2),
+            "quat": _body_quat((spec.tail2_pitch.axis, spec.stand_tail2_pitch)),
         },
     )
-    _add_joint(tail2, spec.tail2, None, spec)
+    _add_joint(tail2, spec.tail2_pitch, None, spec)
     ET.SubElement(
         tail2,
         "geom",
@@ -740,6 +858,54 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
             "tail2_geom",
             spec.tail2_size,
             (-spec.tail2_len / 2.0, 0.0, 0.0),
+            spec,
+            _GREEN,
+            contype=2,
+            conaffinity=1,
+        ),
+    )
+
+    tail3 = ET.SubElement(
+        tail2,
+        "body",
+        {
+            "name": "tail_3",
+            "pos": vec((-spec.tail2_len, 0.0, 0.0)),
+            "quat": _body_quat((spec.tail3_yaw.axis, spec.stand_tail3_yaw)),
+        },
+    )
+    _add_joint(tail3, spec.tail3_yaw, None, spec)
+    ET.SubElement(
+        tail3,
+        "geom",
+        _geom_attributes(
+            "tail3_geom",
+            spec.tail3_size,
+            (-spec.tail3_len / 2.0, 0.0, 0.0),
+            spec,
+            _GREEN,
+            contype=2,
+            conaffinity=1,
+        ),
+    )
+
+    tail4 = ET.SubElement(
+        tail3,
+        "body",
+        {
+            "name": "tail_4",
+            "pos": vec((-spec.tail3_len, 0.0, 0.0)),
+            "quat": _body_quat((spec.tail4_pitch.axis, spec.stand_tail4_pitch)),
+        },
+    )
+    _add_joint(tail4, spec.tail4_pitch, None, spec)
+    ET.SubElement(
+        tail4,
+        "geom",
+        _geom_attributes(
+            "tail4_geom",
+            spec.tail4_size,
+            (-spec.tail4_len / 2.0, 0.0, 0.0),
             spec,
             _GREEN,
             contype=2,
@@ -899,6 +1065,10 @@ def verify_dino_static(
     _check_duplicates(report, actual_joints, "joint")
     if len(hinges) != spec.nu:
         report.errors.append(f"关节数量应为 {spec.nu}，实际 {len(hinges)}")
+    expected_axes = {
+        joint_name(joint, side): tuple(round(v, 9) for v in joint.axis_for(side))
+        for joint, side in spec.actuated()
+    }
     for joint in hinges:
         name = joint.get("name", "?")
         rng = joint.get("range")
@@ -911,6 +1081,11 @@ def verify_dino_static(
         axis = [float(value) for value in (joint.get("axis") or "0 0 1").split()]
         if abs(math.sqrt(sum(value * value for value in axis)) - 1.0) > 1e-9:
             report.errors.append(f"关节 {name} 的 axis 不是单位向量")
+        expected_axis = expected_axes.get(name)
+        if expected_axis is not None and tuple(round(v, 9) for v in axis) != expected_axis:
+            report.errors.append(
+                f"关节 {name} 的 axis 应为 {expected_axis}，实际 {tuple(axis)}"
+            )
 
     actuators = robot_root.find("actuator")
     actuator_elems = list(actuators) if actuators is not None else []

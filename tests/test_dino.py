@@ -20,38 +20,67 @@ from desktop_robot.dino import (
     verify_dino_static,
 )
 
+#: 期望的关节顺序（= body 深度优先遍历 + body 内关节定义顺序）。
+EXPECTED_JOINTS = [
+    "neck_pitch",
+    "neck_yaw",
+    "shoulder_pitch_L",
+    "shoulder_pitch_R",
+    "hip_pitch_L",
+    "hip_roll_L",
+    "knee_L",
+    "ankle_L",
+    "hip_pitch_R",
+    "hip_roll_R",
+    "knee_R",
+    "ankle_R",
+    "tail1_yaw",
+    "tail2_pitch",
+    "tail3_yaw",
+    "tail4_pitch",
+]
+
+#: 期望的轴：俯仰 (0,-1,0)；偏航 (0,0,1)；内外翻左右镜像。
+EXPECTED_AXES = {
+    "neck_pitch": (0.0, -1.0, 0.0),
+    "neck_yaw": (0.0, 0.0, 1.0),
+    "shoulder_pitch_L": (0.0, -1.0, 0.0),
+    "shoulder_pitch_R": (0.0, -1.0, 0.0),
+    "hip_pitch_L": (0.0, -1.0, 0.0),
+    "hip_pitch_R": (0.0, -1.0, 0.0),
+    "hip_roll_L": (1.0, 0.0, 0.0),
+    "hip_roll_R": (-1.0, 0.0, 0.0),
+    "knee_L": (0.0, -1.0, 0.0),
+    "knee_R": (0.0, -1.0, 0.0),
+    "ankle_L": (0.0, -1.0, 0.0),
+    "ankle_R": (0.0, -1.0, 0.0),
+    "tail1_yaw": (0.0, 0.0, 1.0),
+    "tail2_pitch": (0.0, -1.0, 0.0),
+    "tail3_yaw": (0.0, 0.0, 1.0),
+    "tail4_pitch": (0.0, -1.0, 0.0),
+}
+
 
 def test_dof_counts():
     spec = DEFAULT_DINO_SPEC
-    assert spec.nq == 18  # 7 自由基座 + 11 个驱动关节
-    assert spec.nv == 17
-    assert spec.nu == 11
-    assert spec.n_bodies == 12
-    assert len(spec.joint_names) == 11
+    assert spec.nq == 23  # 7 自由基座 + 16 个驱动关节
+    assert spec.nv == 22
+    assert spec.nu == 16
+    assert spec.n_bodies == 14  # 尾巴 4 节，body 比上一版多 2 个
+    assert len(spec.joint_names) == 16
 
 
 def test_joint_order_matches_mjcf_traversal():
     """qpos 顺序必须与 body 的深度优先遍历一致。"""
-    assert DEFAULT_DINO_SPEC.joint_names == [
-        "neck_pitch",
-        "shoulder_pitch_L",
-        "shoulder_pitch_R",
-        "hip_pitch_L",
-        "knee_L",
-        "ankle_L",
-        "hip_pitch_R",
-        "knee_R",
-        "ankle_R",
-        "tail1_pitch",
-        "tail2_pitch",
-    ]
+    assert DEFAULT_DINO_SPEC.joint_names == EXPECTED_JOINTS
 
 
-def test_all_joints_are_pitch_and_unit():
-    """11 个关节都是同一根俯仰轴 (0, -1, 0)。"""
+def test_joint_axes():
+    """16 个关节的轴：俯仰 / 偏航 / 左右镜像的内外翻。"""
     for joint, side in DEFAULT_DINO_SPEC.actuated():
-        axis = joint.axis_for(side)
-        assert axis == (0.0, -1.0, 0.0), joint.name
+        name = joint_name(joint, side)
+        axis = tuple(joint.axis_for(side))
+        assert axis == EXPECTED_AXES[name], name
         assert math.dist(axis, (0.0, 0.0, 0.0)) == pytest.approx(1.0)
 
 
@@ -81,7 +110,7 @@ def test_stand_pose_is_plausible():
 
 def test_mass_is_plausible_for_a_desktop_robot():
     mass = DEFAULT_DINO_SPEC.total_mass()
-    assert 0.5 < mass < 4.0, f"总质量 {mass:.3f} kg 不像桌面机器人"
+    assert 0.5 < mass < 6.0, f"总质量 {mass:.3f} kg 不像桌面机器人"
 
 
 def test_rendered_structure():
@@ -105,9 +134,34 @@ def test_rendered_structure():
     assert key is not None
     qpos = [float(v) for v in key.get("qpos").split()]
     assert len(qpos) == spec.nq
-    assert len(key.get("ctrl").split()) == spec.nu
+    ctrl = [float(v) for v in key.get("ctrl").split()]
+    assert len(ctrl) == spec.nu
     assert math.sqrt(sum(v * v for v in qpos[3:7])) == pytest.approx(1.0)
     assert qpos[2] == pytest.approx(solve_base_z(spec), abs=1e-6)
+    # 零位即站姿：关键帧的关节角和 ctrl 全是 0
+    assert all(v == 0.0 for v in qpos[7:])
+    assert all(v == 0.0 for v in ctrl)
+
+
+def test_tail_chain_nesting():
+    """4 节尾巴必须串成 tail_1 → tail_2 → tail_3 → tail_4，不能都挂在躯干上。"""
+    root = ET.fromstring(render_dino_xml(DEFAULT_DINO_SPEC))
+    parent = root.find(".//body[@name='tail_1']")
+    assert parent is not None
+    for index in (2, 3, 4):
+        child = parent.find(f"body[@name='tail_{index}']")
+        assert child is not None, f"tail_{index} 不是 tail_{index - 1} 的子 body"
+        parent = child
+
+
+def test_every_joint_has_a_bearing_cap():
+    root = ET.fromstring(render_dino_xml(DEFAULT_DINO_SPEC))
+    cap_names = {
+        g.get("name")
+        for g in root.findall(".//geom")
+        if (g.get("name") or "").startswith("cap_")
+    }
+    assert cap_names == {f"cap_{name}" for name in DEFAULT_DINO_SPEC.joint_names}
 
 
 def test_scene_has_include_ground_and_cameras():
@@ -131,7 +185,9 @@ def test_rendering_is_deterministic():
     [
         ("thigh_size", (0.048, 0.040, 0.120), "shank_L", "pos", "0 0 -0.12"),
         ("shank_size", (0.044, 0.036, 0.100), "foot_R", "pos", "0 0 -0.1"),
-        ("tail1_size", (0.120, 0.042, 0.036), "tail_2", "pos", "-0.12 0 0"),
+        ("tail1_size", (0.120, 0.070, 0.086), "tail_2", "pos", "-0.12 0 0"),
+        ("tail2_size", (0.100, 0.065, 0.074), "tail_3", "pos", "-0.1 0 0"),
+        ("tail3_size", (0.090, 0.061, 0.062), "tail_4", "pos", "-0.09 0 0"),
     ],
 )
 def test_link_length_changes_propagate(field, value, body_name, attr, expected):
@@ -147,13 +203,13 @@ def test_arm_and_tail_geometry_tracks_their_size():
     spec = replace(
         DEFAULT_DINO_SPEC,
         arm_size=(0.045, 0.032, 0.090),
-        tail2_size=(0.110, 0.036, 0.030),
+        tail4_size=(0.120, 0.056, 0.050),
     )
     root = ET.fromstring(render_dino_xml(spec))
     arm_geom = root.find(".//geom[@name='arm_geom_L']")
     assert arm_geom.get("pos") == "0 0 -0.045"  # 臂几何中心 = −臂长/2
-    tail2_geom = root.find(".//geom[@name='tail2_geom']")
-    assert tail2_geom.get("pos") == "-0.055 0 0"  # 尾 2 几何中心 = −尾长/2
+    tail4_geom = root.find(".//geom[@name='tail4_geom']")
+    assert tail4_geom.get("pos") == "-0.06 0 0"  # 尾 4 几何中心 = −尾长/2
 
 
 def test_committed_dino_models_are_up_to_date():

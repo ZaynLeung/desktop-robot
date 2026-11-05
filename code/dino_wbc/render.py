@@ -36,6 +36,39 @@ def require_cv2():
     return cv2
 
 
+# ----------------------------------------------------------------------
+# 渲染节拍（纯函数，便于单测）
+# ----------------------------------------------------------------------
+#: 浮点比较容差：仿真时间差小于它就当作"没有变化"。
+_SIM_EPS = 1e-9
+
+
+def clamp_render_clock(next_render: float, sim_time: float, dt: float) -> float:
+    """限制渲染节拍：最多领先当前仿真时间一帧。
+
+    关键作用：复位 / 切阶段会把 ``data.time`` 归零，如果渲染节拍还停在上一次
+    运行的旧值（例如 5.0 s），主循环要等仿真时间重新爬到 5.0 s 才会再渲染。
+    这段时间窗口不 ``imshow`` 也不 ``pollKey``，Windows 会判定 **Not Responding**。
+    这里把节拍拉回 ``sim_time + dt``，最多晚一帧就恢复。
+    """
+    return min(float(next_render), float(sim_time) + float(dt))
+
+
+def advance_render_clock(next_render: float, sim_time: float, dt: float) -> float:
+    """渲染完一帧后推进节拍。
+
+    * 正常：``next_render + dt``，保持平均 1/dt 的帧率（不会被 20 ms 物理步长
+      量化成 25 fps）；
+    * 落后（渲染很慢 / ``--fast``）：直接对齐到 ``sim_time + dt``，避免恢复瞬间
+      连续补帧；
+    * 复位（``sim_time`` 大幅回退）：不允许领先超过一帧。
+    """
+    candidate = float(next_render) + float(dt)
+    if candidate < float(sim_time):
+        candidate = float(sim_time) + float(dt)
+    return min(candidate, float(sim_time) + float(dt))
+
+
 def _to_bgr(image) -> np.ndarray:
     """RGB / 灰度 / None → BGR uint8 三通道。"""
     cv2 = require_cv2()

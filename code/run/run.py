@@ -40,7 +40,13 @@ from dino_wbc.action import action_to_ctrl
 from dino_wbc.cameras import CameraNotFoundError, DualRenderer, FollowCamera, HeadCamera
 from dino_wbc.controllers.registry import load_controller
 from dino_wbc.observation import ObsBuilder, make_command
-from dino_wbc.render import VideoRecorder, compose_frame, require_cv2
+from dino_wbc.render import (
+    VideoRecorder,
+    advance_render_clock,
+    clamp_render_clock,
+    compose_frame,
+    require_cv2,
+)
 from dino_wbc.state import apply_standup_pose, read_state, reset_to_stand
 
 try:  # pragma: no cover - 缺包时给出可读错误
@@ -241,6 +247,10 @@ class Runner:
 
             started = time.perf_counter()
 
+            # 0) 复位/切阶段会把 data.time 归零；渲染节拍必须跟着回退，
+            #    否则要等仿真时间爬回旧节拍，期间不渲染也不轮询窗口消息 → 假死。
+            next_render = clamp_render_clock(next_render, self.data.time, RENDER_DT)
+
             # 1) 观测 → 控制器动作 → 位置伺服目标
             state = read_state(self.model, self.data, self.layout)
             self._last_state = state
@@ -260,13 +270,14 @@ class Runner:
             # 3) 渲染（按仿真时间限流到 RENDER_FPS）
             if self._need_render and self.data.time >= next_render:
                 self._render()
-                # 累加而不是从当前时刻重算：否则 0.02 s 的物理步长会把 30 fps
-                # 量化成 25 fps（视频变快）；落后超过一帧（--fast 或卡顿）时对齐。
-                next_render += RENDER_DT
-                if next_render < self.data.time:
-                    next_render = self.data.time + RENDER_DT
+                next_render = advance_render_clock(
+                    next_render, self.data.time, RENDER_DT
+                )
 
-            # 4) 实时限速（--fast 不限速）
+            # 4) 键盘/窗口消息：每个控制步都轮询，不依赖渲染
+            self._poll_gui()
+
+            # 5) 实时限速（--fast 不限速）
             if not self.args.fast:
                 remaining = CONTROL_DT - (time.perf_counter() - started)
                 if remaining > 0:
@@ -294,8 +305,21 @@ class Runner:
         if not self.args.headless:
             cv2 = require_cv2()
             cv2.imshow(WINDOW_NAME, frame)
-            key = int(cv2.waitKey(1)) & 0xFF
-            self._handle_key(key)
+
+    def _poll_gui(self) -> None:
+        """每个控制步都轮询键盘/窗口消息，不把输入绑在渲染上。
+
+        - 用 ``cv2.pollKey()``（非阻塞）优先，老版本退回 ``waitKey(1)``；
+        - 即使某一帧渲染很慢、或帧率被节流，窗口也一直 pump 消息，按键立即可用；
+        - 之前 ``waitKey`` 只在 ``_render()`` 里调用，渲染一停输入就"失联"，
+          也是窗口被判定 Not Responding 的直接原因之一。
+        """
+        if self.args.headless:
+            return
+        cv2 = require_cv2()
+        poll_key = getattr(cv2, "pollKey", None)
+        raw = poll_key() if callable(poll_key) else cv2.waitKey(1)
+        self._handle_key(int(raw) & 0xFF)
 
     def _update_fps(self) -> None:
         self._fps_frames += 1

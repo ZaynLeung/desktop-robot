@@ -117,7 +117,11 @@ def test_lift_foot_rejects_bad_arguments():
 # registry.json
 # ----------------------------------------------------------------------
 def test_registry_json_skeleton(code_dir):
-    """初始 registry 必须覆盖四个阶段，且指向 code/checkpoints/<stage>。"""
+    """registry 必须覆盖四个阶段、且是 code/ 下的相对 policy.pt 路径。
+
+    训练结束后 ``train.py`` 会把对应阶段改写成 ``checkpoints/<stage>_<时间戳>/policy.pt``，
+    所以这里只校验 schema，不写死目录名（否则每训练一次测试就会挂）。
+    """
     path = code_dir / "registry.json"
     assert path.exists(), "code/registry.json 缺失"
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -125,8 +129,9 @@ def test_registry_json_skeleton(code_dir):
         assert stage in payload, f"registry.json 缺少阶段 {stage!r}"
         entry = payload[stage]
         assert entry["stage"] == stage
-        assert entry["checkpoint"].endswith(f"{stage}/policy.pt")
-        assert not str(entry["checkpoint"]).startswith(("/", "\\"))
+        checkpoint = str(entry["checkpoint"])
+        assert checkpoint.endswith("policy.pt"), checkpoint
+        assert not checkpoint.startswith(("/", "\\")), "checkpoint 必须是相对路径"
 
 
 def test_registry_scripted_names():

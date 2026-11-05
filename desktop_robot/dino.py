@@ -211,7 +211,7 @@ class DinoSpec:
     stand_tail3_yaw: float = 0.0
     stand_tail4_pitch: float = 0.14
 
-    density: float = 800.0
+    density: float = 400.0
 
     # ------------------------------------------------------------------
     # 长度（全部由尺寸分量派生，改尺寸后自动生效）

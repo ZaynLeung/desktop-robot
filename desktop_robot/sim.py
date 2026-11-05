@@ -91,6 +91,9 @@ def view(path: Path | str) -> None:
 
     import time  # noqa: PLC0415
 
+    # ``mujoco.viewer`` 是子模块，``import mujoco`` 不会自动导入它
+    import mujoco.viewer  # noqa: PLC0415
+
     with mj.viewer.launch_passive(model, data) as viewer:
         viewer.cam.azimuth = 135
         viewer.cam.elevation = -20

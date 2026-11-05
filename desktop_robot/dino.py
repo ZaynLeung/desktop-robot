@@ -38,6 +38,13 @@
 正角 = 子连杆向前摆（对朝后的尾巴，正角 = 尾尖下压）。标称站姿里躯干抬头
 ``base_pitch``，踝关节按「基座俯仰 + 髋 + 膝 + 踝 = 0」反解，保证足底水平。
 
+模型的**零位就是标称站姿**：躯干 body 的 ``pos`` / ``quat`` 是站姿的基座高度与
+抬头角，其余每个 body 的 ``quat`` 是它自己那个关节的站姿角（髋/膝/踝/颈/肩/尾）。
+于是 ``qpos`` 全 0 时模型正好是标称站姿、脚底落在 z=0：``dino.xml`` /
+``dino_scene.xml`` 一加载就站在地面上，不依赖"先套 stand 关键帧"。``stand``
+关键帧仍然保留（关节角全 0、``ctrl`` 全 0），用于 ``mj_resetDataKeyframe`` 复位；
+位置执行器的 ``ctrl=0`` 也就等于站姿。
+
 python -m desktop_robot build-dino
 """
 
@@ -371,21 +378,33 @@ def solve_base_z(spec: DinoSpec) -> float:
     return -lowest
 
 
-def base_quat(spec: DinoSpec) -> tuple[float, float, float, float]:
-    """标称站姿的基座四元数 ``(qw, qx, qy, qz)``：绕 ``(0, -1, 0)`` 抬头。"""
-    half_angle = spec.base_pitch / 2.0
+def pitch_quat(angle: float) -> tuple[float, float, float, float]:
+    """绕俯仰轴 ``(0, -1, 0)`` 转 ``angle`` 的四元数（MJCF 的 ``(w, x, y, z)``）。"""
+    half_angle = angle / 2.0
     return (math.cos(half_angle), 0.0, -math.sin(half_angle), 0.0)
 
 
+def base_quat(spec: DinoSpec) -> tuple[float, float, float, float]:
+    """标称站姿的基座四元数 ``(qw, qx, qy, qz)``：绕 ``(0, -1, 0)`` 抬头。"""
+    return pitch_quat(spec.base_pitch)
+
+
+def _body_quat(angle: float) -> str:
+    """body 的静止姿态：把关节的站姿角烘进 ``quat``，使 qpos=0 时就是站姿。"""
+    return vec(pitch_quat(angle))
+
+
 def stand_qpos(spec: DinoSpec) -> list[float]:
-    """``stand`` 关键帧的完整 qpos（7 位自由关节 + 11 个关节角）。"""
-    q = spec.stand_q()
+    """``stand`` 关键帧的完整 qpos。
+
+    基座取站姿的高度/抬头角，11 个关节角全 0——因为模型的零位已经是站姿了。
+    """
     return [
         0.0,
         0.0,
         solve_base_z(spec),
         *base_quat(spec),
-    ] + [q[name] for name in spec.joint_names]
+    ] + [0.0] * spec.nu
 
 
 def head_top_z(spec: DinoSpec) -> float:
@@ -426,13 +445,22 @@ def _geom_attributes(
     }
 
 
-def _joint_attributes(joint: JointSpec, side: str | None) -> dict[str, str]:
+def _joint_attributes(
+    joint: JointSpec, side: str | None, spec: DinoSpec
+) -> dict[str, str]:
+    """一个 hinge 的属性表。
+
+    关节坐标的零位是**标称站姿**（站姿角烘在 body 的 ``quat`` 里），所以这里的
+    ``range``（本来写的是物理角）要减去该关节的站姿角，换算到"相对站姿"的坐标。
+    """
     name = joint_name(joint, side)
+    stand = spec.stand_q()[name]
+    low, high = joint.range
     return {
         "name": name,
         "type": "hinge",
         "axis": vec(joint.axis_for(side)),
-        "range": vec(joint.range),
+        "range": vec((low - stand, high - stand)),
         "limited": "true",
         "armature": fnum(joint.armature),
         "damping": fnum(joint.damping),
@@ -475,19 +503,29 @@ def _cap_attributes(joint: JointSpec, side: str | None) -> dict[str, str] | None
     }
 
 
-def _add_joint(body: ET.Element, joint: JointSpec, side: str | None) -> None:
+def _add_joint(
+    body: ET.Element, joint: JointSpec, side: str | None, spec: DinoSpec
+) -> None:
     """在 body 原点挂一个铰链，再加上它的灰色轴承外壳（如果有）。"""
-    ET.SubElement(body, "joint", _joint_attributes(joint, side))
+    ET.SubElement(body, "joint", _joint_attributes(joint, side, spec))
     cap = _cap_attributes(joint, side)
     if cap is not None:
         ET.SubElement(body, "geom", cap)
 
 
 def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
-    """挂一条腿：thigh → shank → foot（foot 上再挂两个前趾）。"""
+    """挂一条腿：thigh → shank → foot（foot 上再挂两个前趾）。
+
+    每个 body 的 ``quat`` 写成它自己那个关节的站姿角，所以 qpos 全 0 时这条腿正好
+    是标称站姿（髋/膝/踝 = ``stand_hip`` / ``stand_knee`` / ``stand_ankle``）。
+    """
     hip = (spec.hip_pos[0], sign * spec.hip_pos[1], spec.hip_pos[2])
-    thigh = ET.SubElement(torso, "body", {"name": f"thigh_{side}", "pos": vec(hip)})
-    _add_joint(thigh, spec.hip, side)
+    thigh = ET.SubElement(
+        torso,
+        "body",
+        {"name": f"thigh_{side}", "pos": vec(hip), "quat": _body_quat(spec.stand_hip)},
+    )
+    _add_joint(thigh, spec.hip, side, spec)
     ET.SubElement(
         thigh,
         "geom",
@@ -503,9 +541,15 @@ def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
     )
 
     shank = ET.SubElement(
-        thigh, "body", {"name": f"shank_{side}", "pos": vec((0.0, 0.0, -spec.thigh_len))}
+        thigh,
+        "body",
+        {
+            "name": f"shank_{side}",
+            "pos": vec((0.0, 0.0, -spec.thigh_len)),
+            "quat": _body_quat(spec.stand_knee),
+        },
     )
-    _add_joint(shank, spec.knee, side)
+    _add_joint(shank, spec.knee, side, spec)
     ET.SubElement(
         shank,
         "geom",
@@ -521,9 +565,15 @@ def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
     )
 
     foot = ET.SubElement(
-        shank, "body", {"name": f"foot_{side}", "pos": vec((0.0, 0.0, -spec.shank_len))}
+        shank,
+        "body",
+        {
+            "name": f"foot_{side}",
+            "pos": vec((0.0, 0.0, -spec.shank_len)),
+            "quat": _body_quat(spec.stand_ankle),
+        },
     )
-    _add_joint(foot, spec.ankle, side)
+    _add_joint(foot, spec.ankle, side, spec)
     ET.SubElement(
         foot,
         "geom",
@@ -562,7 +612,17 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     ET.SubElement(root, "compiler", {"angle": "radian", "autolimits": "true"})
     world = ET.SubElement(root, "worldbody")
 
-    torso = ET.SubElement(world, "body", {"name": "torso", "pos": "0 0 0"})
+    # ---- 浮基座：body 的 pos/quat 就是 freejoint 的 qpos0，直接写成标称站姿，
+    #      这样模型文件单独加载（不套 stand 关键帧）时也站在地面上 ----
+    torso = ET.SubElement(
+        world,
+        "body",
+        {
+            "name": "torso",
+            "pos": vec((0.0, 0.0, solve_base_z(spec))),
+            "quat": vec(base_quat(spec)),
+        },
+    )
     ET.SubElement(torso, "freejoint", {"name": "root"})
     ET.SubElement(
         torso,
@@ -579,8 +639,16 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     )
 
     # ---- 头：颈关节在躯干上前方，头几何再向前上方偏一段 ----
-    head = ET.SubElement(torso, "body", {"name": "head", "pos": vec(spec.neck_pos)})
-    _add_joint(head, spec.neck, None)
+    head = ET.SubElement(
+        torso,
+        "body",
+        {
+            "name": "head",
+            "pos": vec(spec.neck_pos),
+            "quat": _body_quat(spec.stand_neck),
+        },
+    )
+    _add_joint(head, spec.neck, None, spec)
     ET.SubElement(
         head,
         "geom",
@@ -602,8 +670,16 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
             sign * spec.shoulder_pos[1],
             spec.shoulder_pos[2],
         )
-        arm = ET.SubElement(torso, "body", {"name": f"arm_{side}", "pos": vec(shoulder)})
-        _add_joint(arm, spec.shoulder, side)
+        arm = ET.SubElement(
+            torso,
+            "body",
+            {
+                "name": f"arm_{side}",
+                "pos": vec(shoulder),
+                "quat": _body_quat(spec.stand_shoulder),
+            },
+        )
+        _add_joint(arm, spec.shoulder, side, spec)
         ET.SubElement(
             arm,
             "geom",
@@ -624,9 +700,15 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
 
     # ---- 尾巴：两节，沿 −x 向后伸 ----
     tail1 = ET.SubElement(
-        torso, "body", {"name": "tail_1", "pos": vec(spec.tail1_pos)}
+        torso,
+        "body",
+        {
+            "name": "tail_1",
+            "pos": vec(spec.tail1_pos),
+            "quat": _body_quat(spec.stand_tail1),
+        },
     )
-    _add_joint(tail1, spec.tail1, None)
+    _add_joint(tail1, spec.tail1, None, spec)
     ET.SubElement(
         tail1,
         "geom",
@@ -642,9 +724,15 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     )
 
     tail2 = ET.SubElement(
-        tail1, "body", {"name": "tail_2", "pos": vec((-spec.tail1_len, 0.0, 0.0))}
+        tail1,
+        "body",
+        {
+            "name": "tail_2",
+            "pos": vec((-spec.tail1_len, 0.0, 0.0)),
+            "quat": _body_quat(spec.stand_tail2),
+        },
     )
-    _add_joint(tail2, spec.tail2, None)
+    _add_joint(tail2, spec.tail2, None, spec)
     ET.SubElement(
         tail2,
         "geom",
@@ -664,8 +752,7 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     for joint, side in spec.actuated():
         ET.SubElement(actuator, "position", _actuator_attributes(joint, side))
 
-    # ---- 关键帧：标称站姿 ----
-    stand = spec.stand_q()
+    # ---- 关键帧：标称站姿（关节角全 0，因为零位就是站姿）----
     keyframe = ET.SubElement(root, "keyframe")
     ET.SubElement(
         keyframe,
@@ -673,7 +760,7 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
         {
             "name": "stand",
             "qpos": vec(stand_qpos(spec)),
-            "ctrl": vec([stand[name] for name in spec.joint_names]),
+            "ctrl": vec([0.0] * spec.nu),
         },
     )
     return root

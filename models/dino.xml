@@ -5,34 +5,34 @@
 <mujoco model="desktop_dino">
   <compiler angle="radian" autolimits="true" />
   <worldbody>
-    <body name="torso" pos="0 0 0">
+    <body name="torso" pos="0 0 0.254057" quat="0.984808 0 -0.173648 0">
       <freejoint name="root" />
       <geom name="torso_geom" type="box" size="0.15 0.0475 0.0425" pos="0 0 0" density="800" rgba="0.30 0.55 0.25 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
-      <body name="head" pos="0.055 0 0.05">
-        <joint name="neck_pitch" type="hinge" axis="0 -1 0" range="-0.7 0.7" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+      <body name="head" pos="0.055 0 0.05" quat="0.992198 0 0.124675 0">
+        <joint name="neck_pitch" type="hinge" axis="0 -1 0" range="-0.45 0.95" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
         <geom name="cap_neck_pitch" type="cylinder" size="0.016 0.024" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
         <geom name="head_geom" type="box" size="0.05 0.036 0.0275" pos="0.032 0 0.022" density="800" rgba="0.30 0.55 0.25 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
       </body>
-      <body name="arm_L" pos="0.048 0.058 0.018">
-        <joint name="shoulder_pitch_L" type="hinge" axis="0 -1 0" range="-1.2 1.2" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+      <body name="arm_L" pos="0.048 0.058 0.018" quat="0.997189 0 0.07493 0">
+        <joint name="shoulder_pitch_L" type="hinge" axis="0 -1 0" range="-1.05 1.35" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
         <geom name="cap_shoulder_pitch_L" type="cylinder" size="0.014 0.019" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
         <geom name="arm_geom_L" type="box" size="0.0225 0.016 0.0375" pos="0 0 -0.0375" density="800" rgba="0.24 0.47 0.20 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
       </body>
-      <body name="arm_R" pos="0.048 -0.058 0.018">
-        <joint name="shoulder_pitch_R" type="hinge" axis="0 -1 0" range="-1.2 1.2" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+      <body name="arm_R" pos="0.048 -0.058 0.018" quat="0.997189 0 0.07493 0">
+        <joint name="shoulder_pitch_R" type="hinge" axis="0 -1 0" range="-1.05 1.35" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
         <geom name="cap_shoulder_pitch_R" type="cylinder" size="0.014 0.019" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
         <geom name="arm_geom_R" type="box" size="0.0225 0.016 0.0375" pos="0 0 -0.0375" density="800" rgba="0.24 0.47 0.20 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
       </body>
-      <body name="thigh_L" pos="-0.085 0.045 -0.03">
-        <joint name="hip_pitch_L" type="hinge" axis="0 -1 0" range="-1.2 1.2" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+      <body name="thigh_L" pos="-0.085 0.045 -0.03" quat="0.988771 0 0.149438 0">
+        <joint name="hip_pitch_L" type="hinge" axis="0 -1 0" range="-0.9 1.5" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
         <geom name="cap_hip_pitch_L" type="cylinder" size="0.016 0.024" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
         <geom name="thigh_geom_L" type="box" size="0.024 0.02 0.045" pos="0 0 -0.045" density="800" rgba="0.24 0.47 0.20 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
-        <body name="shank_L" pos="0 0 -0.09">
-          <joint name="knee_L" type="hinge" axis="0 -1 0" range="-1.6 0.05" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+        <body name="shank_L" pos="0 0 -0.09" quat="0.99875 0 0.049979 0">
+          <joint name="knee_L" type="hinge" axis="0 -1 0" range="-1.5 0.15" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
           <geom name="cap_knee_L" type="cylinder" size="0.014 0.021" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
           <geom name="shank_geom_L" type="box" size="0.022 0.018 0.0375" pos="0 0 -0.0375" density="800" rgba="0.24 0.47 0.20 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
-          <body name="foot_L" pos="0 0 -0.075">
-            <joint name="ankle_L" type="hinge" axis="0 -1 0" range="-0.6 0.8" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+          <body name="foot_L" pos="0 0 -0.075" quat="0.999676 0 -0.025464 0">
+            <joint name="ankle_L" type="hinge" axis="0 -1 0" range="-0.650934 0.749066" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
             <geom name="cap_ankle_L" type="cylinder" size="0.012 0.017" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
             <geom name="foot_geom_L" type="box" size="0.0425 0.0275 0.016" pos="0.012 0 -0.016" density="800" rgba="0.24 0.47 0.20 1" friction="1.2 0.02 0.001" contype="1" conaffinity="1" />
             <geom name="toe_geom_L1" type="box" size="0.014 0.009 0.013" pos="0.0625 -0.013 -0.019" density="800" rgba="0.12 0.12 0.13 1" friction="1.2 0.02 0.001" contype="1" conaffinity="1" />
@@ -40,16 +40,16 @@
           </body>
         </body>
       </body>
-      <body name="thigh_R" pos="-0.085 -0.045 -0.03">
-        <joint name="hip_pitch_R" type="hinge" axis="0 -1 0" range="-1.2 1.2" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+      <body name="thigh_R" pos="-0.085 -0.045 -0.03" quat="0.988771 0 0.149438 0">
+        <joint name="hip_pitch_R" type="hinge" axis="0 -1 0" range="-0.9 1.5" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
         <geom name="cap_hip_pitch_R" type="cylinder" size="0.016 0.024" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
         <geom name="thigh_geom_R" type="box" size="0.024 0.02 0.045" pos="0 0 -0.045" density="800" rgba="0.24 0.47 0.20 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
-        <body name="shank_R" pos="0 0 -0.09">
-          <joint name="knee_R" type="hinge" axis="0 -1 0" range="-1.6 0.05" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+        <body name="shank_R" pos="0 0 -0.09" quat="0.99875 0 0.049979 0">
+          <joint name="knee_R" type="hinge" axis="0 -1 0" range="-1.5 0.15" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
           <geom name="cap_knee_R" type="cylinder" size="0.014 0.021" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
           <geom name="shank_geom_R" type="box" size="0.022 0.018 0.0375" pos="0 0 -0.0375" density="800" rgba="0.24 0.47 0.20 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
-          <body name="foot_R" pos="0 0 -0.075">
-            <joint name="ankle_R" type="hinge" axis="0 -1 0" range="-0.6 0.8" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+          <body name="foot_R" pos="0 0 -0.075" quat="0.999676 0 -0.025464 0">
+            <joint name="ankle_R" type="hinge" axis="0 -1 0" range="-0.650934 0.749066" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
             <geom name="cap_ankle_R" type="cylinder" size="0.012 0.017" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
             <geom name="foot_geom_R" type="box" size="0.0425 0.0275 0.016" pos="0.012 0 -0.016" density="800" rgba="0.24 0.47 0.20 1" friction="1.2 0.02 0.001" contype="1" conaffinity="1" />
             <geom name="toe_geom_R1" type="box" size="0.014 0.009 0.013" pos="0.0625 -0.013 -0.019" density="800" rgba="0.12 0.12 0.13 1" friction="1.2 0.02 0.001" contype="1" conaffinity="1" />
@@ -57,12 +57,12 @@
           </body>
         </body>
       </body>
-      <body name="tail_1" pos="-0.068 0 -0.02">
-        <joint name="tail1_pitch" type="hinge" axis="0 -1 0" range="-0.8 0.8" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+      <body name="tail_1" pos="-0.068 0 -0.02" quat="0.995004 0 -0.099833 0">
+        <joint name="tail1_pitch" type="hinge" axis="0 -1 0" range="-1 0.6" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
         <geom name="cap_tail1_pitch" type="cylinder" size="0.012 0.017" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
         <geom name="tail1_geom" type="box" size="0.0425 0.021 0.018" pos="-0.0425 0 0" density="800" rgba="0.30 0.55 0.25 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
-        <body name="tail_2" pos="-0.085 0 0">
-          <joint name="tail2_pitch" type="hinge" axis="0 -1 0" range="-0.8 0.8" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
+        <body name="tail_2" pos="-0.085 0 0" quat="0.998201 0 -0.059964 0">
+          <joint name="tail2_pitch" type="hinge" axis="0 -1 0" range="-0.92 0.68" limited="true" armature="0.005" damping="0.05" frictionloss="0.02" pos="0 0 0" />
           <geom name="cap_tail2_pitch" type="cylinder" size="0.011 0.015" pos="0 0 0" quat="0.7071068 0.7071068 0 0" rgba="0.55 0.56 0.58 1" density="0" contype="0" conaffinity="0" />
           <geom name="tail2_geom" type="box" size="0.04 0.018 0.015" pos="-0.04 0 0" density="800" rgba="0.30 0.55 0.25 1" friction="0.9 0.02 0.001" contype="2" conaffinity="1" />
         </body>
@@ -83,6 +83,6 @@
     <position name="act_tail2_pitch" joint="tail2_pitch" kp="25" kv="1" forcerange="-2.5 2.5" forcelimited="true" inheritrange="1" ctrllimited="true" />
   </actuator>
   <keyframe>
-    <key name="stand" qpos="0 0 0.254057 0.984808 0 -0.173648 0 -0.25 -0.15 -0.15 -0.3 -0.1 0.050934 -0.3 -0.1 0.050934 0.2 0.12" ctrl="-0.25 -0.15 -0.15 -0.3 -0.1 0.050934 -0.3 -0.1 0.050934 0.2 0.12" />
+    <key name="stand" qpos="0 0 0.254057 0.984808 0 -0.173648 0 0 0 0 0 0 0 0 0 0 0 0" ctrl="0 0 0 0 0 0 0 0 0 0 0" />
   </keyframe>
 </mujoco>

@@ -79,17 +79,28 @@ cd D:\2026\HKUST\EESM-Robotic\desktop
 # 0) 不训练，只做环境自检（任何阶段都能跑）
 & $py code/train/train.py --stage lift --check
 
-# 1) 站立 + 分别抬左右脚（这是后续阶段的初始化来源）
-& $py code/train/train.py --stage lift --envs 16 --steps 4000000 --device auto
+# 1) 站立 + 外力轻推（所有后续阶段的初始化来源）
+& $py code/train/train.py --stage stand --envs 16 --steps 4000000 --device auto
 
-# 2) 翻正起身（课程：深蹲 → 侧躺 → 仰卧）
+# 2) 站立 + 分别抬左右脚（从 stand 热启动）
+& $py code/train/train.py --stage lift --envs 16 --steps 8000000 --device auto `
+    --init-from code/checkpoints/stand_<时间戳>/model.zip
+
+# 3) 翻正起身（课程：深蹲 → 侧躺 → 仰卧）
 & $py code/train/train.py --stage standup --envs 16 --steps 8000000 --device auto `
     --init-from code/checkpoints/lift_<时间戳>/model.zip
 
-# 3) 前后左右行走
+# 4) 前后左右行走
 & $py code/train/train.py --stage walk --envs 16 --steps 6000000 --device auto `
     --init-from code/checkpoints/lift_<时间戳>/model.zip
 ```
+
+> **为什么先训 stand**：v1 直接从 lift 开始，策略学成了“躯干撑地 + 蹲着”的局部最优
+> （实测 base z 0.113 m、躯干着地 211/400 步）。v2 把 stand 做成正式阶段
+> （严格摔倒门限 + 躯干接触即终止 + 0→5 N 轻推课程），lift 从它的 `model.zip` 热启动。
+> `--log-std-init` 默认 **-1.0**（初始动作更温和）；50k 步对照实验里 ep_len 33→164、
+> 平均回报 84→459，是本站立任务的关键超参。
+
 
 产物（默认 `code/checkpoints/<stage>_<时间戳>/`）：
 
@@ -140,7 +151,9 @@ $py = "E:\conda_envs\desktop-robot\python.exe"
 
 画面：**左 = 第三人称跟随**（平滑跟踪躯干），**右 = 头部第一视角**（`cam_head`，绑定 `head` body），底部 HUD 显示控制器/命令/基座高度/倾角/接触/FPS。
 
-按键（非 headless）：`1–4` 热切换 stand / lift / standup / walk，`W/S` 调 vx，`A/D` 调 vy，`L/R` 抬左/右脚，`U` 起身命令，`V` 循环 standup 起始姿态（crouch / side / supine，默认仰卧），`Space` 复位，`F` 切换跟随相机模式，`Esc` 退出。
+按键（非 headless）：`1–4` 热切换 stand / lift / standup / walk，`W/S` 调 vx，`A/D` 调 vy，`L/R` 抬左/右脚，`U` 起身命令，`V` 循环 standup 起始姿态（crouch / side / supine，默认仰卧），`P` 手动轻推一下（5 N × 0.1 s），`Space` 复位，`F` 切换跟随相机模式，`Esc` 退出。
+
+`--lift-h 0.03` 可以改抬脚高度指令（默认 0.025 m，夹在 `LIFT_H_RANGE` 内）。
 
 > 切到 `standup` 时运行端会用 `dino_wbc.state.apply_standup_pose` 把机器人摆成躺倒姿态
 > （与训练 reset 完全同一个实现），所以能直接看到"从仰卧站起来"的过程。
@@ -174,15 +187,19 @@ class Controller(ABC):
 
 ---
 
-## 6. 三阶段与课程
+## 6. 四个阶段与课程
 
 | 阶段 | reset | 关键奖励 | 终止 |
 | --- | --- | --- | --- |
-| `lift` | 站姿 + 噪声；随机目标脚、抬脚高度 | 站直/高度/存活 + 目标脚抬到 `h` + 支撑脚接触/不滑 | 跌倒（z<0.10 或相对倾角>60°） |
+| `stand` | 站姿 + 噪声；0–5 N 轻推课程 | 高度（σ 2 cm）+ 相对倾角 + 双足接触 + 低姿态/关节姿态惩罚 | 躯干/头/臂/腿着地、z<z0−0.06、倾角>40°、出界 |
+| `lift` | 站姿 + 噪声；随机目标脚、抬脚高度 | 站立项 + **姿态门限内**的抬脚高度/线性抬脚/支撑脚接触/重心靠支撑脚 | 同 stand（躯干着地即终止） |
 | `standup` | 课程：深蹲(z≈0.14) → 侧躺(90°) → 仰卧(180°) | 势函数进度 `5(γΦ_t−Φ_{t-1})` + 成功 +5 + 脚找地 | 连续站立 0.5 s 成功；超时/出界 |
 | `walk` | 站姿 + 随机速度指令 | 速度跟踪 + 站直/高度 + 摆动足离地 + 交替接触 + 无偏航 | 跌倒/出界/超时 |
 
-课程推进：`lift` 抬脚高度、`walk` 速度随成功率（20 个 episode 窗口）爬坡；`standup` 成功率 ≥70% 晋级、≤30% 退档。
+* 尾巴着地**允许**（T-rex 的尾巴本来就是配重/支撑），只给 −0.2/步的小惩罚；躯干/头/臂/腿着地会直接终止。
+* `stand` 成功 = 整集不摔 + 平均高度项 >0.8；`lift` 成功 = **连续**保持 ≥0.5 s（不是累计），且每一步都满足 `foot_z ≥ 0.8h`、支撑脚接触、姿态门限。
+* 课程推进：`stand` 只推轻推力度（0→5 N）；`lift` 抬脚高度 1→4 cm（成功 +0.03、失败 −0.01）；`walk` 速度随成功率爬坡；`standup` ≥70% 晋级、≤30% 退档。
+
 
 所有数值集中在 `dino_wbc/config.py`；奖励权重在 `STAGES[...].reward`。
 
@@ -209,6 +226,9 @@ class Controller(ABC):
 | `torch.cuda.is_available()` 为 False | 确认装的是 cu128 轮子、驱动 ≥ 对应 CUDA 版本；先用 `--device cpu` 跑通流程 |
 | `PolicyContractError` | 模型改过（重新 build-dino / 改关节），用当前模型重新训练 |
 | `找不到 checkpoint` | 先训练，或把 `--checkpoint` 指向已有 `policy.pt` |
+| 抬脚时机器人趴/蹲在地上 | v1 的局部最优；已修（躯干着地终止 + 严格高度门限 + 连续保持课程）。若仍出现，先确认 `stand` 已训到验收标准，再用它 warm-start `lift` |
+| stand 训得很慢 / ep_len 上不去 | 用默认 `--log-std-init -1.0`；确认没有把 `--device cuda` 当默认（物理在 CPU）；必要时把 `--envs` 提到 16 并在普通终端跑 |
+| 按 `Space`/`1–4` 后窗口假死 | 已修：渲染节拍随复位回退 + 每控制步轮询 `cv2.pollKey` |
 | 没有窗口/远程环境 | 用 `--headless`（可配合 `--record`） |
 | 渲染太慢 | `--fast`、降低 `RENDER_WIDTH/HEIGHT`、或 `--no-head` |
 | 训练很慢 | 减小 `--envs`（默认 16）观察 CPU 占用；物理在 CPU，GPU 只加速网络 |
@@ -232,8 +252,12 @@ $py = "E:\conda_envs\desktop-robot\python.exe"
 cd D:\2026\HKUST\EESM-Robotic\desktop
 ''' -->
 
-##  1 站立 + 抬左右脚（后续阶段的初始化来源）
-& $py code/train/train.py --stage lift --envs 16 --steps 4000000 --device auto
+## 0 站立 + 轻推（所有后续阶段的初始化来源）
+& $py code/train/train.py --stage stand --envs 16 --steps 4000000 --device auto
+
+##  1 站立 + 抬左右脚（用上一步的 model.zip 热启动）
+& $py code/train/train.py --stage lift --envs 16 --steps 8000000 --device auto `
+    --init-from code/checkpoints/stand_<时间戳>/model.zip
 
 ## 2 翻正起身（用上一步的 model.zip 热启动）
 & $py code/train/train.py --stage standup --envs 16 --steps 8000000 --device auto `
@@ -244,6 +268,8 @@ cd D:\2026\HKUST\EESM-Robotic\desktop
     --init-from code/checkpoints/lift_<时间戳>/model.zip
 
 ## 评测 / 运行（训练结束后 registry.json 已自动指向对应 checkpoint）
-& $py code/train/evaluate.py --controller lift --episodes 20
-& $py code/run/run.py --controller lift --record code/videos/lift.mp4
+& $py code/train/evaluate.py --controller stand --episodes 20
+& $py code/train/evaluate.py --controller lift --episodes 20 --lift-h 0.02
+& $py code/run/run.py --controller stand
+& $py code/run/run.py --controller lift --lift-h 0.02 --record code/videos/lift.mp4
 & $py code/run/run.py --controller standup --record code/videos/standup.mp4

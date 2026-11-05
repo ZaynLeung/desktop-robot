@@ -3,8 +3,12 @@
 奖励返回 ``(总奖励, 未加权分项)``：分项直接进 TensorBoard/info，
 方便判断是"没学会"还是"奖励没调好"。
 
-数值都是**起始值**，集中在 :mod:`dino_wbc.config` 的 ``STAGES[...].reward``，
-调参时只改那里。
+诊断修复（2026-11 v2）：
+* ``upright`` 改成**相对标称站姿的倾角**指数项（站姿=1），不再是原始 ``up_z``；
+* 高度容差从 3 cm 收紧到 2 cm，新增 ``low_posture`` 惩罚，堵住"蹲着/趴着"的局部最优；
+* 抬脚项只在 **stance gate** 成立时给（站在站姿高度附近、不歪、躯干不着地），
+  并新增稠密线性项 ``lift_frac`` 与 ``target_ground`` 惩罚，解决 4 cm 时梯度消失；
+* 躯干/头/臂/腿接触地板会终止（``body_contact``），尾巴接触允许但轻微惩罚。
 """
 
 from __future__ import annotations
@@ -18,19 +22,23 @@ from .state import RobotState
 #: 势函数折扣（与 PPO 的 gamma 保持一致）。
 POTENTIAL_GAMMA = 0.99
 
-#: 高度奖励的容差（m）：偏离站姿高度 3 cm 时衰减到 1/e。
-HEIGHT_SIGMA = 0.03
+#: 高度奖励的容差（m）：偏离站姿高度 2 cm 时衰减到 1/e。
+HEIGHT_SIGMA = 0.02
+#: 姿态奖励的容差（rad）：相对站姿倾角 0.2 rad（约 11.5°）时衰减到 1/e。
+UPRIGHT_SIGMA = 0.2
 #: 抬脚高度的容差（m）。
-LIFT_SIGMA = 0.010
+LIFT_SIGMA = 0.015
 #: 步态摆动足的期望离地高度容差（m）。
 CLEARANCE_SIGMA = 0.010
+#: "重心在支撑脚上方"的容差（m）。
+COM_SIGMA = 0.05
 
 
 # ----------------------------------------------------------------------
 # 判据
 # ----------------------------------------------------------------------
 def is_fallen(state: RobotState) -> bool:
-    """站立类任务的摔倒判据。"""
+    """walk 用的通用摔倒判据（stand/lift 用更严格的阶段门限，见 env）。"""
     return bool(
         state.base_pos[2] < config.FALL_BASE_Z
         or state.tilt_deg > config.FALL_TILT_DEG
@@ -52,6 +60,19 @@ def out_of_bounds(state: RobotState) -> bool:
     )
 
 
+def lift_stance_ok(state: RobotState, layout: JointLayout) -> bool:
+    """抬脚奖励/课程的姿态门限。
+
+    必须"站在站姿高度附近 + 基本竖直 + 躯干没有撑地"，抬脚项才有意义；
+    否则策略会像 v1 那样趴在/蹲在地上蹭抬脚奖励。
+    """
+    return bool(
+        (not state.body_contact)
+        and state.base_pos[2] > layout.stand_base_z - config.LIFT_STANCE_Z_DELTA
+        and state.tilt_deg < config.LIFT_STANCE_TILT_DEG
+    )
+
+
 def potential(state: RobotState, layout: JointLayout) -> float:
     """standup 的势函数：越高、越竖直、关节越接近站姿，值越大。"""
     height_term = 2.0 * (state.base_pos[2] / max(layout.stand_base_z, 1e-6))
@@ -70,31 +91,60 @@ def _common_terms(
     layout: JointLayout,
 ) -> dict[str, float]:
     height_error = (state.base_pos[2] - layout.stand_base_z) / HEIGHT_SIGMA
+    tilt_error = state.tilt_rad / UPRIGHT_SIGMA
+    low_posture = max(
+        0.0,
+        (layout.stand_base_z - config.LIFT_STANCE_Z_DELTA - state.base_pos[2])
+        / config.LIFT_STANCE_Z_DELTA,
+    )
     return {
-        "upright": state.uprightness,
-        "height": float(np.exp(-height_error * height_error)),
         "alive": 1.0,
-        "action_mag": float(np.mean(np.square(action))),
-        "action_rate": float(np.mean(np.square(action - prev_action))),
+        "height": float(np.exp(-height_error * height_error)),
+        "upright": float(np.exp(-tilt_error * tilt_error)),
         "base_vel": float(np.sum(np.square(state.base_lin_vel_b[:2]))),
         "yaw_rate": float(state.base_ang_vel_b[2] ** 2),
+        "foot_contact": 1.0 if bool(state.contact.all()) else 0.0,
+        "foot_slip": float(np.mean(np.exp(-20.0 * np.square(state.foot_slip)))),
+        "action_mag": float(np.mean(np.square(action))),
+        "action_rate": float(np.mean(np.square(action - prev_action))),
+        "joint_posture": float(np.mean(np.square(state.q))),
+        "low_posture": float(low_posture),
+        "body_contact": 1.0 if state.body_contact else 0.0,
+        "tail_contact": 1.0 if state.tail_contact else 0.0,
     }
 
 
 def _lift_terms(
     state: RobotState,
     command: np.ndarray,
+    *,
+    gate: bool,
 ) -> dict[str, float]:
+    """抬脚专属项；``gate`` 为 False 时全部返回 0（不给"趴着抬脚"任何奖励）。"""
+    if not gate:
+        return {
+            "lift_height": 0.0,
+            "lift_frac": 0.0,
+            "target_ground": 0.0,
+            "support_contact": 0.0,
+            "support_slip": 0.0,
+            "com_over_support": 0.0,
+        }
     target = 0 if command[config.CMD_TARGET_FOOT] < 0 else 1
     support = 1 - target
-    wanted_h = float(command[config.CMD_LIFT_H])
-    error = (state.foot_z[target] - wanted_h) / LIFT_SIGMA
-    slip_error = state.foot_slip[support]
+    wanted = max(float(command[config.CMD_LIFT_H]), 1e-3)
+    foot_z = float(state.foot_z[target])
+    error = (foot_z - wanted) / LIFT_SIGMA
+    support_slip = float(state.foot_slip[support])
+    delta_xy = state.base_pos[:2] - state.foot_pos[support][:2]
+    com_error = float(np.dot(delta_xy, delta_xy)) / (COM_SIGMA * COM_SIGMA)
     return {
         "lift_height": float(np.exp(-error * error)),
-        "support_contact": 1.0 if state.contact[support] else 0.0,
-        "support_slip": float(np.exp(-20.0 * slip_error * slip_error)),
-        "target_foot": float(target),
+        "lift_frac": float(np.clip(foot_z / wanted, 0.0, 1.0)),
+        "target_ground": 1.0 if bool(state.contact[target]) else 0.0,
+        "support_contact": 1.0 if bool(state.contact[support]) else 0.0,
+        "support_slip": float(np.exp(-20.0 * support_slip * support_slip)),
+        "com_over_support": float(np.exp(-com_error)),
     }
 
 
@@ -138,8 +188,11 @@ def compute_reward(
     weights = stage_cfg.reward
     terms = _common_terms(state, action, prev_action, layout)
 
-    if stage in ("lift", "walk"):
-        terms.update(_lift_terms(state, command) if stage == "lift" else _walk_terms(state, command, phase))
+    if stage == "lift":
+        gate = (not fallen) and lift_stance_ok(state, layout)
+        terms.update(_lift_terms(state, command, gate=gate))
+    elif stage == "walk":
+        terms.update(_walk_terms(state, command, phase))
     elif stage == "standup":
         if phi_prev is None:
             phi_prev = phi

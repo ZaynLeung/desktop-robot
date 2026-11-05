@@ -87,3 +87,24 @@ def test_obs_is_clipped(rig):
     state = read_state(model, data, layout)
     obs = ObsBuilder(layout).build(state, make_command("stand"), gait=False)
     assert np.max(np.abs(obs)) <= max(config.JOINT_VEL_CLIP, config.BASE_ANG_VEL_CLIP) + 1e-6
+
+
+def test_body_contact_detected_when_lying(rig):
+    """躯干着地必须能被识别（v1 的"趴着活 400 步"就是漏了这个信号）。"""
+    from dino_wbc.state import quat_from_roll_deg
+
+    model, layout, data = rig
+    data.qpos[2] = 0.03
+    data.qpos[3:7] = quat_from_roll_deg(180.0)
+    mujoco.mj_forward(model, data)
+    state = read_state(model, data, layout)
+    assert state.body_contact
+    assert not state.tail_contact  # 仰卧时尾巴翘起，不接触
+
+
+def test_standing_has_no_body_contact(rig):
+    model, layout, data = rig
+    state = read_state(model, data, layout)
+    assert not state.body_contact
+    # 该模型的标称站姿尾巴尖端本来就轻触地面（约 4.7 N），这是允许的。
+    assert isinstance(state.tail_contact, bool)

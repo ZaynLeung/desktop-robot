@@ -168,13 +168,41 @@ SIM_TIMESTEP = 0.002
 # ----------------------------------------------------------------------
 # 终止 / 成功判据
 # ----------------------------------------------------------------------
-FALL_BASE_Z = 0.10  # 基座低于此高度视为摔倒
-FALL_TILT_DEG = 60.0  # 躯干倾角超过此值视为摔倒
+FALL_BASE_Z = 0.10  # walk 用的全局摔倒高度（stand / lift 用更严格的阶段门限）
+FALL_TILT_DEG = 60.0  # walk 用的全局摔倒倾角
 SUCCESS_Z_TOL = 0.03  # standup 成功：基座高度误差
 SUCCESS_TILT_DEG = 20.0
 SUCCESS_HOLD_STEPS = 25  # 保持 0.5 s 才算站起来
 STANDUP_TIMEOUT_STEPS = 400  # 8 s
 WORLD_HALF_EXTENT = 2.0  # 4 m × 4 m 地面，滚出界算失败
+
+# ---- stand / lift 的严格门限 ------------------------------------------------
+# 诊断结论：旧策略在 z=0.113 m、tilt≈48°、躯干撑地 211/400 步的情况下仍"存活"，
+# 因为全局门限是 z<0.10 / tilt>60° 且不检查躯干接触。下面这组门限专门堵住该局部最优。
+STAND_FALL_Z_DELTA = 0.06  # z < z_stand - 0.06 即终止
+STAND_FALL_TILT_DEG = 40.0
+LIFT_FALL_Z_DELTA = 0.06
+LIFT_FALL_TILT_DEG = 40.0
+LIFT_STANCE_Z_DELTA = 0.03  # 抬脚奖励/课程要求的姿态门限：z > z_stand - 0.03
+LIFT_STANCE_TILT_DEG = 25.0
+LIFT_HOLD_STEPS = 25  # 连续保持 0.5 s 才算"抬脚成功"（不是累计）
+LIFT_HEIGHT_RATIO = 0.8  # 达到指令高度的 80% 即算达标步
+
+# ----------------------------------------------------------------------
+# 外力轻推（stand 阶段的扰动课程）
+# ----------------------------------------------------------------------
+@dataclass(frozen=True)
+class PushConfig:
+    """周期性水平轻推，用于训练"被推一下也不倒"的站立策略。"""
+
+    enabled: bool = False
+    max_force: float = 0.0  # 课程上限（N）；实际力在 [0.5, 1.0]×上限 采样
+    duration_steps: int = 5  # 5 × 20 ms = 0.1 s
+    interval_steps: tuple[int, int] = (75, 150)  # 每 1.5–3 s 一次
+
+PUSH_RAMP_UP = 0.2  # 成功一次 +0.2 N
+PUSH_RAMP_DOWN = 0.1  # 失败一次 -0.1 N
+PUSH_MIN_FORCE = 0.5  # 采样下限（× 当前上限）
 
 #: 站姿基座高度由模型 ``stand`` 关键帧给出，不在配置里硬编码。
 STAND_KEYFRAME = "stand"
@@ -200,6 +228,13 @@ class StageConfig:
     reward: dict[str, float] = field(default_factory=dict)
     #: 该阶段是否推进步态时钟。
     gait: bool = False
+    #: 阶段专属摔倒门限（None = 用全局 FALL_*）。
+    fall_z_delta: float | None = None  # 相对站姿基座高度的下降量（m）
+    fall_tilt_deg: float | None = None
+    #: 躯干/头/臂/腿（不含尾巴）接触地板时是否终止。
+    terminate_on_body_contact: bool = False
+    #: 外力轻推课程；None = 不施加。
+    push: PushConfig | None = None
 
     @property
     def duration_s(self) -> float:
@@ -211,13 +246,29 @@ STAGES: dict[str, StageConfig] = {
         name="stand",
         episode_steps=400,
         reset_mode="stand",
+        fall_z_delta=STAND_FALL_Z_DELTA,
+        fall_tilt_deg=STAND_FALL_TILT_DEG,
+        terminate_on_body_contact=True,
+        push=PushConfig(
+            enabled=True,
+            max_force=5.0,
+            duration_steps=5,
+            interval_steps=(75, 150),
+        ),
         reward={
-            "upright": 1.0,
-            "height": 1.0,
-            "alive": 0.5,
+            "alive": 0.3,
+            "height": 1.5,
+            "upright": 1.5,
+            "base_vel": 0.5,
+            "yaw_rate": 0.2,
+            "foot_contact": 0.3,
+            "foot_slip": 0.3,
             "action_mag": 0.02,
             "action_rate": 0.001,
-            "base_vel": 0.5,
+            "joint_posture": -0.05,
+            "low_posture": -2.0,
+            "body_contact": -5.0,
+            "tail_contact": -0.2,
             "fall": -5.0,
         },
     ),
@@ -225,17 +276,30 @@ STAGES: dict[str, StageConfig] = {
         name="lift",
         episode_steps=400,
         reset_mode="stand",
+        fall_z_delta=LIFT_FALL_Z_DELTA,
+        fall_tilt_deg=LIFT_FALL_TILT_DEG,
+        terminate_on_body_contact=True,
         reward={
-            "upright": 1.0,
+            "alive": 0.2,
             "height": 1.0,
-            "alive": 0.5,
-            "lift_height": 2.0,
-            "support_contact": 0.5,
-            "support_slip": 0.3,
+            "upright": 1.0,
+            "base_vel": 0.5,
+            "yaw_rate": 0.1,
+            "foot_slip": 0.3,
             "action_mag": 0.02,
             "action_rate": 0.001,
-            "base_vel": 0.5,
+            "joint_posture": -0.05,
+            "low_posture": -2.0,
+            "body_contact": -5.0,
+            "tail_contact": -0.2,
             "fall": -5.0,
+            # 抬脚专属项（只有 stance gate 成立时才给）
+            "lift_height": 2.0,
+            "lift_frac": 2.0,
+            "target_ground": -0.5,
+            "support_contact": 0.5,
+            "support_slip": 0.3,
+            "com_over_support": 0.2,
         },
     ),
     "standup": StageConfig(
@@ -353,6 +417,9 @@ CURRICULUM: dict[str, dict[str, CurriculumRange]] = {
 }
 CURRICULUM_WINDOW = 20
 CURRICULUM_SUCCESS = 0.60
+#: lift 课程晋级/退档步长（比之前慢：必须稳定连续保持才允许加高）。
+CURRICULUM_LIFT_UP = 0.03
+CURRICULUM_LIFT_DOWN = 0.01
 
 # ----------------------------------------------------------------------
 # 奖励/终止共用的判据

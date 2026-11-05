@@ -48,6 +48,10 @@ class RobotState:
     foot_slip: np.ndarray  # (2,) 足部水平速度模长
     contact: np.ndarray  # (2,) bool
     contact_force: np.ndarray  # (2,) 法向力 N
+    #: 躯干/头/臂/大腿/小腿/膝接触地板（**不含足和尾巴**）。
+    body_contact: bool
+    #: 尾巴接触地板（允许，但会被轻微惩罚）。
+    tail_contact: bool
     tilt_rad: float  # 相对标称站姿的倾角（站姿 = 0）
     time: float
 
@@ -85,6 +89,38 @@ def _foot_force(model, data, geom_id: int) -> float:
         mujoco.mj_contactForce(model, data, index, force)
         total += float(force[0])
     return total
+
+
+def _floor_contacts(model, data, layout: JointLayout) -> tuple[bool, bool]:
+    """返回 ``(body_contact, tail_contact)``：地板与身体/尾巴的接触。
+
+    足部接触由 :func:`read_state` 单独统计；这里只看"非足"的接触。
+    尾巴单独区分：T-rex 尾巴作为配重/支撑是设计的一部分，允许接触，
+    只给轻微惩罚；躯干/头/臂/腿着地则视为摔倒并终止。
+    """
+    floor = int(layout.floor_geom_id)
+    if floor < 0:
+        return False, False
+    foot_ids = {gid for ids in layout.foot_geom_ids.values() for gid in ids}
+    body = False
+    tail = False
+    force = np.zeros(6, dtype=np.float64)
+    for index in range(data.ncon):
+        contact = data.contact[index]
+        if contact.geom1 != floor and contact.geom2 != floor:
+            continue
+        other = contact.geom2 if contact.geom1 == floor else contact.geom1
+        if other in foot_ids:
+            continue
+        mujoco.mj_contactForce(model, data, index, force)
+        if float(force[0]) <= config.CONTACT_FORCE_EPS:
+            continue
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, other) or ""
+        if name.startswith("tail"):
+            tail = True
+        else:
+            body = True
+    return body, tail
 
 
 def read_state(model, data, layout: JointLayout) -> RobotState:
@@ -127,6 +163,8 @@ def read_state(model, data, layout: JointLayout) -> RobotState:
 
         contact_force[index] = sum(_foot_force(model, data, gid) for gid in geoms)
 
+    body_contact, tail_contact = _floor_contacts(model, data, layout)
+
     return RobotState(
         base_pos=np.asarray(data.qpos[0:3], dtype=np.float64).copy(),
         base_quat=np.asarray(data.qpos[3:7], dtype=np.float64).copy(),
@@ -141,6 +179,8 @@ def read_state(model, data, layout: JointLayout) -> RobotState:
         foot_slip=foot_slip,
         contact=contact_force > config.CONTACT_FORCE_EPS,
         contact_force=contact_force,
+        body_contact=body_contact,
+        tail_contact=tail_contact,
         tilt_rad=tilt,
         time=float(data.time),
     )

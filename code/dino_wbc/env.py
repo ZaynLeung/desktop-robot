@@ -22,8 +22,8 @@ from .model_io import JointLayout, load
 from .observation import ObsBuilder, make_command
 from .rewards import (
     compute_reward,
-    is_fallen,
     is_standing,
+    lift_stance_ok,
     out_of_bounds,
     potential,
 )
@@ -91,11 +91,20 @@ class DinoWbcEnv(gym.Env):
         self._success_streak = 0
         self._phi_prev = 0.0
         self._lift_reached_steps = 0
+        self._lift_streak = 0  # 连续达标步数
+        self._lift_best_streak = 0
         self._vel_track_sum = 0.0
         self._height_term_sum = 0.0
         self._episode_success = False
         self._episode_closed = False
+        self._fell = False
         self._last_terms: dict[str, float] = {}
+        # ---- 外力轻推状态 ----
+        self._push_remaining = 0
+        self._next_push_step = 0
+        self._push_force = 0.0  # 本次推力的模长（N）
+        self._push_vec = np.zeros(3, dtype=np.float64)
+        self._pushed = False
 
     # ------------------------------------------------------------------
     # reset
@@ -116,10 +125,14 @@ class DinoWbcEnv(gym.Env):
         self._success_streak = 0
         self._phi_prev = potential(state, self.layout)
         self._lift_reached_steps = 0
+        self._lift_streak = 0
+        self._lift_best_streak = 0
         self._vel_track_sum = 0.0
         self._height_term_sum = 0.0
         self._episode_success = False
         self._episode_closed = False
+        self._fell = False
+        self._reset_push()
         # standup 的成功必须"从低处起来"：防止浅蹲/站立初始姿态被误判为起身成功
         self._started_below_stand = bool(
             state.base_pos[2] < self.layout.stand_base_z - config.SUCCESS_Z_TOL
@@ -168,6 +181,45 @@ class DinoWbcEnv(gym.Env):
         return make_command(self.stage)
 
     # ------------------------------------------------------------------
+    # 外力轻推
+    # ------------------------------------------------------------------
+    def _reset_push(self) -> None:
+        self._push_remaining = 0
+        self._push_force = 0.0
+        self._push_vec[:] = 0.0
+        self._pushed = False
+        self.data.xfrc_applied[:] = 0.0
+        push = self.stage_config.push
+        if push is None or not push.enabled:
+            self._next_push_step = 1 << 30
+            return
+        self._next_push_step = int(self.rng.integers(*push.interval_steps))
+
+    def _update_push(self) -> None:
+        """在物理步之前设置/清除 ``xfrc_applied``。"""
+        push = self.stage_config.push
+        if push is None or not push.enabled:
+            return
+        torso = self.layout.torso_body_id
+        if self._push_remaining > 0:
+            self.data.xfrc_applied[torso, :3] = self._push_vec
+            self._push_remaining -= 1
+            if self._push_remaining == 0:
+                self.data.xfrc_applied[torso, :3] = 0.0
+            return
+        if self._step_count >= self._next_push_step:
+            force = float(self.curriculum.sample_push_force())
+            angle = float(self.rng.uniform(0.0, 2.0 * np.pi))
+            self._push_force = force
+            self._push_vec[:] = (force * np.cos(angle), force * np.sin(angle), 0.0)
+            self._push_remaining = max(int(push.duration_steps) - 1, 0)
+            self._next_push_step = self._step_count + int(
+                self.rng.integers(*push.interval_steps)
+            )
+            self._pushed = True
+            self.data.xfrc_applied[torso, :3] = self._push_vec
+
+    # ------------------------------------------------------------------
     # step
     # ------------------------------------------------------------------
     def step(self, action):
@@ -179,6 +231,8 @@ class DinoWbcEnv(gym.Env):
 
         ctrl = action_to_ctrl(raw, self.layout)
         self.data.ctrl[:] = ctrl
+        self._pushed = False
+        self._update_push()
         for _ in range(config.DECIMATION):
             mujoco.mj_step(self.model, self.data)
         self._step_count += 1
@@ -191,8 +245,28 @@ class DinoWbcEnv(gym.Env):
         fallen = False
         if not finite:
             fallen = True
-        elif self.stage_config.reset_mode == "stand":
-            fallen = is_fallen(state) or out_of_bounds(state)
+        elif self.stage_config.reset_mode == "standup":
+            # 躺倒阶段不按站姿判摔倒；滚出界仍算失败。
+            fallen = out_of_bounds(state)
+        else:
+            cfg = self.stage_config
+            fall_z = (
+                self.layout.stand_base_z - cfg.fall_z_delta
+                if cfg.fall_z_delta is not None
+                else config.FALL_BASE_Z
+            )
+            fall_tilt = (
+                cfg.fall_tilt_deg
+                if cfg.fall_tilt_deg is not None
+                else config.FALL_TILT_DEG
+            )
+            fallen = bool(
+                state.base_pos[2] < fall_z
+                or state.tilt_deg > fall_tilt
+                or out_of_bounds(state)
+                or (cfg.terminate_on_body_contact and state.body_contact)
+            )
+        self._fell = self._fell or fallen
 
         # standup：以"连续站立 0.5 s"为成功；躺倒阶段不判跌倒。
         success = False
@@ -257,14 +331,29 @@ class DinoWbcEnv(gym.Env):
     def _track_curriculum_metrics(
         self, state, terms: dict[str, float], fallen: bool
     ) -> None:
-        """累计"这一步算不算达标"，episode 结束时再判定成败。"""
+        """累计"这一步算不算达标"，episode 结束时再判定成败。
+
+        抬脚改为**连续保持**（``_lift_streak``）：v1 用"累计 25 步"导致
+        跌倒过程中脚瞬时冲到 3–4 cm 也被算成功，课程因此被骗到 4 cm。
+        """
         if fallen:
+            self._lift_streak = 0
             return
         if self.stage == "lift":
             target = 0 if self._command[config.CMD_TARGET_FOOT] < 0 else 1
-            wanted = float(self._command[config.CMD_LIFT_H])
-            if state.foot_z[target] >= 0.8 * wanted and state.contact[1 - target]:
+            wanted = max(float(self._command[config.CMD_LIFT_H]), 1e-3)
+            support = 1 - target
+            reached = (
+                state.foot_z[target] >= config.LIFT_HEIGHT_RATIO * wanted
+                and bool(state.contact[support])
+                and lift_stance_ok(state, self.layout)
+            )
+            if reached:
                 self._lift_reached_steps += 1
+                self._lift_streak += 1
+                self._lift_best_streak = max(self._lift_best_streak, self._lift_streak)
+            else:
+                self._lift_streak = 0
         elif self.stage == "walk":
             self._vel_track_sum += terms.get("vel_track", 0.0)
         elif self.stage == "stand":
@@ -275,17 +364,23 @@ class DinoWbcEnv(gym.Env):
         steps = max(self._step_count, 1)
         if self.stage == "lift":
             self._episode_success = (
-                self._lift_reached_steps >= config.SUCCESS_HOLD_STEPS
+                (not self._fell)
+                and self._lift_best_streak >= config.LIFT_HOLD_STEPS
             )
         elif self.stage == "walk":
-            self._episode_success = self._vel_track_sum / steps > 0.60
+            self._episode_success = (
+                not self._fell
+            ) and self._vel_track_sum / steps > 0.60
         elif self.stage == "stand":
-            self._episode_success = self._height_term_sum / steps > 0.50
+            self._episode_success = (
+                not self._fell
+            ) and self._height_term_sum / steps > 0.80
         else:
             self._episode_success = bool(self._episode_success or success_now)
         return bool(self._episode_success)
 
     def _make_info(self, state, *, success: bool, fallen: bool) -> dict[str, Any]:
+        target = 0 if self._command[config.CMD_TARGET_FOOT] < 0 else 1
         return {
             "stage": self.stage,
             "success": bool(success),
@@ -297,6 +392,14 @@ class DinoWbcEnv(gym.Env):
             "command": self._command.copy(),
             "step": self._step_count,
             "curriculum": self.curriculum.state().__dict__,
+            "body_contact": bool(state.body_contact),
+            "tail_contact": bool(state.tail_contact),
+            "target_foot_z": float(state.foot_z[target]),
+            "support_contact": bool(state.contact[1 - target]),
+            "lift_streak": int(self._lift_streak),
+            "lift_best_streak": int(self._lift_best_streak),
+            "pushed": bool(self._pushed),
+            "push_force": float(self._push_force),
         }
 
     # ------------------------------------------------------------------

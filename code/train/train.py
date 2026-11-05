@@ -47,6 +47,14 @@ def linear_schedule(initial: float):
     return _schedule
 
 
+def _parse_arch(text: str) -> list[int]:
+    """``"256,128"`` → ``[256, 128]``；空串报错。"""
+    hidden = [int(part) for part in str(text).replace("x", ",").split(",") if part.strip()]
+    if not hidden:
+        raise ValueError("--net-arch 不能为空，例如 256,128")
+    return hidden
+
+
 def make_env(stage: str, seed: int, model_path: str | None):
     """返回一个可被 SubprocVecEnv 序列化的环境工厂。"""
 
@@ -100,6 +108,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--n-epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument(
+        "--net-arch",
+        default="256,128",
+        help="策略/价值网络隐层，逗号分隔（默认 256,128；容量不足时可试 512,256）",
+    )
+    parser.add_argument("--ent-coef", type=float, default=0.005, help="PPO 熵系数")
+    parser.add_argument(
+        "--log-std-init",
+        type=float,
+        default=-1.0,
+        help="初始动作标准差 ln 值（越小起步越温和；默认 -1.0≈0.37，"
+        "实测比默认 0 的 ep_len/回报好一个量级）",
+    )
     parser.add_argument("--eval-freq", type=int, default=50_000)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--check", action="store_true", help="只做环境自检后退出")
@@ -188,9 +209,14 @@ def run_training(args: argparse.Namespace) -> int:
     eval_env = VecMonitor(eval_env)
 
     policy_kwargs = {
-        "net_arch": {"pi": [256, 128], "vf": [256, 128]},
+        "net_arch": {"pi": _parse_arch(args.net_arch), "vf": _parse_arch(args.net_arch)},
         "activation_fn": torch.nn.ELU,
+        "log_std_init": float(args.log_std_init),
     }
+    print(
+        f"[net] {args.net_arch}  ent_coef={args.ent_coef}  "
+        f"log_std_init={args.log_std_init}"
+    )
 
     if args.init_from:
         init_path = Path(args.init_from)
@@ -213,7 +239,7 @@ def run_training(args: argparse.Namespace) -> int:
             gamma=0.99,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.005,
+            ent_coef=args.ent_coef,
             vf_coef=0.5,
             max_grad_norm=0.5,
             policy_kwargs=policy_kwargs,

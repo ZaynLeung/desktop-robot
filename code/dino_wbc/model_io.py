@@ -52,6 +52,8 @@ class JointLayout:
     head_body_id: int
     foot_geom_ids: Mapping[str, tuple[int, ...]]
     foot_body_ids: Mapping[str, int]
+    #: 地板 geom id（``dino_scene.xml`` 里为 ``floor``；单独加载 ``dino.xml`` 时为 -1）。
+    floor_geom_id: int
     keyframe_name: str
     stand_qpos: np.ndarray  # (7 + N,)
     stand_base_z: float
@@ -172,6 +174,9 @@ def build_layout(
             side: _name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"foot_{side}")
             for side in ("L", "R")
         },
+        floor_geom_id=int(
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        ),
         keyframe_name=stand_key,
         stand_qpos=stand_qpos,
         stand_base_z=float(stand_qpos[2]),

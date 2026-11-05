@@ -66,7 +66,11 @@ def _load_registry(path: Path | None = None) -> dict[str, Any]:
 
 
 def _resolve_checkpoint(entry: dict[str, Any], checkpoint: str | None) -> Path:
-    """registry 条目 → checkpoint 绝对路径（相对路径以 ``code/`` 为基准）。"""
+    """registry 条目 → checkpoint 绝对路径。
+
+    registry 里存的是相对 ``code/`` 的路径；命令行 ``--checkpoint`` 则按用户
+    当前目录解析（存在优先），不存在再退回相对 ``code/``，两种写法都能用。
+    """
     raw = checkpoint if checkpoint is not None else entry.get("checkpoint")
     if not raw:
         raise ControllerNotFoundError(
@@ -74,7 +78,8 @@ def _resolve_checkpoint(entry: dict[str, Any], checkpoint: str | None) -> Path:
         )
     target = Path(str(raw))
     if not target.is_absolute():
-        target = (CODE_DIR / target).resolve()
+        from_cwd = (Path.cwd() / target).resolve()
+        target = from_cwd if from_cwd.exists() else (CODE_DIR / target).resolve()
     return target
 
 

@@ -25,6 +25,7 @@ class CurriculumState:
     max_lift_h: float
     max_vx: float
     max_vy: float
+    push_force: float = 0.0
 
 
 class Curriculum:
@@ -39,6 +40,9 @@ class Curriculum:
         self.lift_h_max = config.LIFT_H_RANGE[0]
         self.vx_max = config.WALK_VX_RANGE[0]
         self.vy_max = config.WALK_VY_RANGE[0]
+        push = config.STAGES[stage].push
+        self.push_force = 0.0
+        self.push_max = float(push.max_force) if push is not None else 0.0
         self._apply_level()
 
     # ------------------------------------------------------------------
@@ -59,6 +63,14 @@ class Curriculum:
     def sample_standup_pose(self) -> config.StandupPose:
         return config.STANDUP_POSES[self.pose_index]
 
+    def sample_push_force(self) -> float:
+        """当前推力课程下的一次推力模长（N）；未启用或还未爬坡时返回 0。"""
+        if self.push_max <= 0.0 or self.push_force <= 0.0:
+            return 0.0
+        return float(
+            self.rng.uniform(config.PUSH_MIN_FORCE * self.push_force, self.push_force)
+        )
+
     # ------------------------------------------------------------------
     # 推进
     # ------------------------------------------------------------------
@@ -66,8 +78,18 @@ class Curriculum:
         self.window.append(bool(success))
         if self.stage == "standup":
             self._advance_standup()
+        elif self.stage == "stand":
+            # 站立阶段只推"轻推力度"课程：成功就加一点，失败就退一点。
+            step = config.PUSH_RAMP_UP if success else -config.PUSH_RAMP_DOWN
+            self.push_force = float(
+                np.clip(self.push_force + step, 0.0, self.push_max)
+            )
         elif self.stage in config.CURRICULUM:
-            step = 0.05 if success else -0.02
+            step = (
+                config.CURRICULUM_LIFT_UP
+                if success
+                else -config.CURRICULUM_LIFT_DOWN
+            )
             self.level = float(np.clip(self.level + step, 0.0, 1.0))
             self._apply_level()
 
@@ -108,4 +130,5 @@ class Curriculum:
             max_lift_h=self.lift_h_max,
             max_vx=self.vx_max,
             max_vy=self.vy_max,
+            push_force=self.push_force,
         )

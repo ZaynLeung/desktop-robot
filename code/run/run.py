@@ -17,6 +17,7 @@
     A / D      vy ±0.02（行走）
     L / R      抬脚目标脚：左脚 / 右脚
     U          命令切成 standup
+    P          手动推一下（5 N × 0.1 s）
     Space      复位到当前阶段起始姿态并重置控制器
     V          standup 阶段切换起始姿态：crouch / side / supine 循环
     F          跟随相机 tracking / free 切换
@@ -130,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="跟随相机不跟踪基座（固定机位）",
     )
+    parser.add_argument(
+        "--lift-h",
+        type=float,
+        default=0.025,
+        help="lift 阶段的抬脚高度指令（m），会夹在 LIFT_H_RANGE 内",
+    )
     return parser
 
 
@@ -162,6 +169,9 @@ class Runner:
         self._fps_t0 = time.perf_counter()
         self._running = True
         self._sim_steps = 0
+        # 手动轻推（P 键）：持续 5 个控制步（0.1 s）后清除
+        self._manual_push_steps = 0
+        self._manual_push_vec = np.zeros(3, dtype=np.float64)
 
         self.renderer: DualRenderer | None = None
         self.recorder: VideoRecorder | None = None
@@ -189,7 +199,10 @@ class Runner:
         """按阶段构造命令，并给 lift 一个训练范围内的默认值。"""
         command = make_command(stage)
         if stage == "lift":
-            command[config.CMD_LIFT_H] = 0.5 * sum(config.LIFT_H_RANGE)
+            low, high = config.LIFT_H_RANGE
+            command[config.CMD_LIFT_H] = float(
+                np.clip(self.args.lift_h, low, high)
+            )
             command[config.CMD_TARGET_FOOT] = -1.0  # 默认抬左脚
         return command
 
@@ -262,7 +275,15 @@ class Runner:
             self.obs_builder.push_action(action)
             self.data.ctrl[:] = action_to_ctrl(action, self.layout)
 
-            # 2) 物理推进（一个控制周期 = DECIMATION 个仿真步）
+            # 2) 手动轻推（P 键）：在物理步之前设置外力，持续 0.1 s
+            if self._manual_push_steps > 0:
+                torso = self.layout.torso_body_id
+                self.data.xfrc_applied[torso, :3] = self._manual_push_vec
+                self._manual_push_steps -= 1
+                if self._manual_push_steps == 0:
+                    self.data.xfrc_applied[torso, :3] = 0.0
+
+            # 3) 物理推进（一个控制周期 = DECIMATION 个仿真步）
             for _ in range(int(config.DECIMATION)):
                 mujoco.mj_step(self.model, self.data)
             self._sim_steps += 1
@@ -354,6 +375,10 @@ class Runner:
                 f"contact {int(state.contact[0])}{int(state.contact[1])}"
             ),
             (
+                f"foot_z L{state.foot_z[0]:.3f} R{state.foot_z[1]:.3f}  "
+                f"body {int(state.body_contact)}  tail {int(state.tail_contact)}"
+            ),
+            (
                 f"fps {self._fps:5.1f}  t {state.time:6.2f}s  "
                 f"{'FAST' if self.args.fast else 'realtime'}"
             ),
@@ -420,6 +445,15 @@ class Runner:
         elif key in (ord("f"), ord("F")):
             tracking = self.follow_cam.toggle()
             print(f"跟随相机：{'tracking' if tracking else 'free（固定机位）'}")
+        elif key in (ord("p"), ord("P")):
+            self._trigger_push()
+
+    def _trigger_push(self, force: float = 5.0, steps: int = 5) -> None:
+        """手动推一下：水平随机方向、5 N、0.1 s。"""
+        angle = float(np.random.uniform(0.0, 2.0 * np.pi))
+        self._manual_push_vec[:] = (force * np.cos(angle), force * np.sin(angle), 0.0)
+        self._manual_push_steps = int(steps)
+        print(f"轻推：{force:.1f} N × {steps} 步（0.1 s）")
 
     def _switch_task(self, stage: str) -> None:
         """1-4 键：重新加载该阶段控制器并复位。"""
@@ -451,6 +485,8 @@ class Runner:
 
     def _reset_episode(self) -> None:
         """按当前阶段复位：standup 摆到课程起始姿态，其余回到站姿。"""
+        self.data.xfrc_applied[:] = 0.0
+        self._manual_push_steps = 0
         if self.controller.stage == "standup":
             pose = self._current_standup_pose()
             assert pose is not None

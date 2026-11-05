@@ -27,6 +27,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="all",
         help="standup 起始姿态：all / crouch / side / supine",
     )
+    parser.add_argument(
+        "--lift-h",
+        type=float,
+        default=None,
+        help="仅 lift：覆盖抬脚高度（m），例如 0.02 / 0.03 / 0.04",
+    )
     parser.add_argument("--json", default=None, help="把完整结果写到该 JSON 文件")
     return parser.parse_args(argv)
 
@@ -50,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         max_steps=args.max_steps,
         standup_pose=args.pose,
+        lift_h=args.lift_h,
     )
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
     for record in result["episodes"]:
@@ -58,7 +65,9 @@ def main(argv: list[str] | None = None) -> int:
             f"  ep{record['episode']:02d}{pose} success={record['success']} "
             f"fallen={record['fallen']} reward={record['reward']:+.2f} "
             f"steps={record['steps']} z={record['base_z']:.3f} "
-            f"tilt={record['tilt_deg']:.1f}"
+            f"tilt={record['tilt_deg']:.1f} "
+            f"foot_z={record['target_foot_z_max']:.3f} "
+            f"body={record['body_contact_rate']:.2f}"
         )
     if args.json:
         Path(args.json).write_text(

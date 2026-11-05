@@ -1,0 +1,23 @@
+# 环境定义（对应 E:\conda_envs\desktop-robot）
+#
+# conda 只负责提供 Python 解释器本身，所有 Python 依赖都走 pip。
+# 这样做的原因：conda 装的 numpy/scipy 依赖 Library\bin 下的 BLAS DLL，
+# 只有 conda activate 之后才在 PATH 上；直接调用 python.exe（IDE、脚本、
+# CI）就会在第一次矩阵乘法时报 0xC06D007F 硬崩溃。
+# pip 安装的 numpy 自带 OpenBLAS（放在 numpy.libs\ 里，用 add_dll_directory
+# 加载），因此不需要激活环境也能正常工作。
+
+name: desktop-robot
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -r requirements.txt
+
+# 用固定路径创建（与团队约定一致）：
+#   conda env create -f environment.yml -p E:\conda_envs\desktop-robot -y
+#
+# 只补装依赖（环境已存在时）：
+#   E:\conda_envs\desktop-robot\python.exe -m pip install -r requirements.txt

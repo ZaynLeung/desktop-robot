@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 由 desktop_robot.builder 自动生成，请勿手工修改。       -->
+<!-- 参数源：desktop_robot/config.py 的 DEFAULT_SPEC。      -->
+<!-- 重新生成：python -m desktop_robot build                -->
+<mujoco model="desktop_biped_scene">
+  <include file="biped.xml" />
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10" gravity="0 0 -9.81" />
+  <statistic center="0 0 0.16" extent="0.4" />
+  <asset>
+    <texture name="sky" type="skybox" builtin="gradient" rgb1="0.30 0.40 0.55" rgb2="0.05 0.06 0.09" width="256" height="256" />
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.24 0.26 0.30" rgb2="0.30 0.33 0.38" mark="edge" markrgb="0.36 0.39 0.44" width="256" height="256" />
+    <material name="grid" texture="grid" texrepeat="16 16" reflectance="0.03" />
+  </asset>
+  <visual>
+    <global azimuth="135" elevation="-20" offwidth="1280" offheight="960" />
+    <quality shadowsize="8192" />
+    <headlight diffuse="0.7 0.7 0.7" ambient="0.25 0.25 0.25" specular="0.1 0.1 0.1" />
+  </visual>
+  <worldbody>
+    <light name="key_light" pos="0.8 -0.8 1.5" dir="-0.4 0.5 -0.75" directional="true" diffuse="0.8 0.8 0.8" specular="0.2 0.2 0.2" />
+    <light name="fill_light" pos="-0.8 0.6 1.0" dir="0.5 -0.4 -0.6" directional="true" diffuse="0.25 0.28 0.32" specular="0 0 0" castshadow="false" />
+    <geom name="floor" type="plane" size="2 2 0.1" pos="0 0 0" material="grid" rgba="0.30 0.33 0.38 1" friction="1.0 0.02 0.001" contype="1" conaffinity="1" />
+    <camera name="front" pos="0.60 0 0.30" xyaxes="0 1 0 -0.2425 0 0.9701" />
+    <camera name="iso" pos="0.45 -0.45 0.30" xyaxes="0.7069 0.7069 0 -0.1621 0.1621 0.9734" />
+  </worldbody>
+</mujoco>

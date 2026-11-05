@@ -1,0 +1,21 @@
+# 运行与开发依赖
+#
+# 项目环境：conda，位置 E:\conda_envs\desktop-robot，Python 3.11
+# 激活：  conda activate E:\conda_envs\desktop-robot
+# 安装：  pip install -r requirements.txt
+
+# ---- 仿真核心 ----
+mujoco>=3.2          # MuJoCo 物理引擎与 Python 绑定
+numpy>=1.26          # 运动学计算
+scipy>=1.11          # 后续做 IK / 优化 / 轨迹规划
+matplotlib>=3.8      # 画图（步态曲线、能量曲线）
+
+# ---- 强化学习（后续阶段）----
+gymnasium>=0.29      # 标准 RL 环境接口，gymnasium[mujoco] 直接对接本模型
+
+# ---- 测试 ----
+pytest>=8.0
+
+# ---- 可选：真正训练时再装，体积很大（torch ~2.5 GB）----
+# stable-baselines3>=2.3
+# torch>=2.3

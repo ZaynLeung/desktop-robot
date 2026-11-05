@@ -1,0 +1,19 @@
+# 统一换行与缩进，配合 .gitattributes 保证生成的 XML 在各机器上逐字节一致
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{xml,yml,yaml,ini,json}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.{py}]
+indent_size = 4

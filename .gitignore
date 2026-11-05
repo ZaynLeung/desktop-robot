@@ -183,3 +183,17 @@ cython_debug/
 .acl-repair/
 .git.medium-backup/
 
+# ---- 本项目的构建 / 运行产物 ----
+# 测试临时目录与 pytest 缓存（见 pytest.ini 的 cache_dir）
+build/
+# 虚拟环境（本项目实际用 conda：E:\conda_envs\desktop-robot）
+.venv/
+# 导出的网格 / 视频 / 图片
+*.stl
+*.obj
+*.mp4
+*.gif
+# MuJoCo 的本地配置与日志
+mjkey.txt
+*.log
+

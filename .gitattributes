@@ -1,2 +1,21 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# 本项目强依赖 LF：models/*.xml 是确定性生成物，
+# tests/test_committed_models.py 会逐字节比对生成结果与提交文件。
+# 如果 git 在 Windows 上把它们检出成 CRLF，测试就会误报失败。
+*.xml   text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.ini   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.gitignore      text eol=lf
+*.gitattributes  text eol=lf
+
+# 二进制（若将来加入网格资产）
+*.stl   binary
+*.obj   binary
+*.png   binary
+*.jpg   binary

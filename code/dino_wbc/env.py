@@ -1,0 +1,321 @@
+"""小恐龙的 Gymnasium 环境（三阶段共用一套代码）。
+
+一个 episode 的流程::
+
+    reset()  →  选定初始姿态（站立 / 深蹲 / 侧躺 / 仰卧）+ 采样命令
+    step(a)  →  a → ctrl（位置伺服）→ mj_step × decimation → 观测/奖励/终止
+
+阶段差异全部由 ``config.STAGES`` 驱动：episode 长度、reset 方式、奖励权重、
+是否推进步态时钟。训练端 ``train/`` 只负责 PPO；这里不依赖 stable-baselines3。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+
+from . import config
+from .action import action_to_ctrl
+from .curriculum import Curriculum
+from .model_io import JointLayout, load
+from .observation import ObsBuilder, make_command
+from .rewards import (
+    compute_reward,
+    is_fallen,
+    is_standing,
+    out_of_bounds,
+    potential,
+)
+from .state import (
+    apply_standup_pose,
+    read_state,
+    reset_to_stand,
+    settle,
+)
+
+try:  # pragma: no cover
+    import gymnasium as gym
+    from gymnasium import spaces
+except ImportError as exc:  # pragma: no cover
+    raise ImportError("dino_wbc.env 需要 gymnasium") from exc
+
+try:  # pragma: no cover
+    import mujoco
+except ImportError as exc:  # pragma: no cover
+    raise ImportError("dino_wbc.env 需要 mujoco") from exc
+
+
+class DinoWbcEnv(gym.Env):
+    """18 个位置伺服关节 + 浮动基座的 WBC 环境。"""
+
+    metadata = {"render_modes": [], "render_fps": config.RENDER_FPS}
+
+    def __init__(
+        self,
+        stage: str = "stand",
+        *,
+        model_path: str | None = None,
+        kp: float | None = None,
+        kv: float | None = None,
+        forcerange: float | dict[str, float] | None = None,
+        seed: int | None = None,
+    ):
+        super().__init__()
+        if stage not in config.STAGES:
+            raise ValueError(f"未知阶段 {stage!r}，可选 {tuple(config.STAGES)}")
+        self.stage = stage
+        self.stage_config = config.STAGES[stage]
+        self.model, self.layout = load(
+            model_path, kp=kp, kv=kv, forcerange=forcerange
+        )
+        self.data = mujoco.MjData(self.model)
+        self.rng = np.random.default_rng(seed)
+        self.obs_builder = ObsBuilder(self.layout)
+        self.curriculum = Curriculum(stage, self.rng)
+
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(config.OBS_DIM,),
+            dtype=np.float32,
+        )
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0, shape=(config.ACTION_DIM,), dtype=np.float32
+        )
+        self.max_episode_steps = self.stage_config.episode_steps
+
+        self._command = make_command(stage)
+        self._prev_action = np.zeros(config.ACTION_DIM, dtype=np.float64)
+        self._step_count = 0
+        self._success_streak = 0
+        self._phi_prev = 0.0
+        self._lift_reached_steps = 0
+        self._vel_track_sum = 0.0
+        self._height_term_sum = 0.0
+        self._episode_success = False
+        self._episode_closed = False
+        self._last_terms: dict[str, float] = {}
+
+    # ------------------------------------------------------------------
+    # reset
+    # ------------------------------------------------------------------
+    def reset(self, *, seed: int | None = None, options: dict | None = None):
+        super().reset(seed=seed)
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+            self.curriculum.rng = self.rng
+
+        self._reset_pose()
+        self._command = self._sample_command()
+        self.obs_builder.reset()
+
+        state = read_state(self.model, self.data, self.layout)
+        self._prev_action[:] = 0.0
+        self._step_count = 0
+        self._success_streak = 0
+        self._phi_prev = potential(state, self.layout)
+        self._lift_reached_steps = 0
+        self._vel_track_sum = 0.0
+        self._height_term_sum = 0.0
+        self._episode_success = False
+        self._episode_closed = False
+        # standup 的成功必须"从低处起来"：防止浅蹲/站立初始姿态被误判为起身成功
+        self._started_below_stand = bool(
+            state.base_pos[2] < self.layout.stand_base_z - config.SUCCESS_Z_TOL
+        )
+
+        obs = self.obs_builder.build(
+            state, self._command, gait=self.stage_config.gait
+        )
+        info = self._make_info(state, success=False, fallen=False)
+        info["command"] = self._command.copy()
+        return obs, info
+
+    def _reset_pose(self) -> None:
+        mujoco.mj_resetData(self.model, self.data)
+        self.data.time = 0.0
+
+        if self.stage_config.reset_mode == "stand":
+            reset_to_stand(self.model, self.data, self.layout)
+            self.data.qpos[self.layout.qposadr] += self.rng.uniform(
+                -config.RESET_Q_NOISE, config.RESET_Q_NOISE, self.layout.num_joints
+            )
+            self.data.qpos[2] += self.rng.uniform(
+                -config.RESET_BASE_Z_NOISE, config.RESET_BASE_Z_NOISE
+            )
+            self.data.qvel[:] = self.rng.uniform(
+                -config.RESET_VEL_NOISE, config.RESET_VEL_NOISE, self.model.nv
+            )
+            mujoco.mj_forward(self.model, self.data)
+            settle(self.model, self.data, self.layout)
+            return
+
+        # standup：按课程档位摆一个躺倒/深蹲姿态，先让物理落到地面。
+        pose = self.curriculum.sample_standup_pose()
+        apply_standup_pose(self.model, self.data, self.layout, pose)
+
+    def _sample_command(self) -> np.ndarray:
+        if self.stage == "lift":
+            return make_command(
+                "lift",
+                lift_h=self.curriculum.sample_lift_h(),
+                target_foot=self.curriculum.sample_lift_target(),
+            )
+        if self.stage == "walk":
+            vx, vy = self.curriculum.sample_velocity()
+            return make_command("walk", vx=vx, vy=vy)
+        return make_command(self.stage)
+
+    # ------------------------------------------------------------------
+    # step
+    # ------------------------------------------------------------------
+    def step(self, action):
+        raw = np.clip(
+            np.asarray(action, dtype=np.float64).reshape(-1), -1.0, 1.0
+        )
+        if raw.shape[0] != config.ACTION_DIM:
+            raise ValueError(f"动作维度应为 {config.ACTION_DIM}，实际 {raw.shape[0]}")
+
+        ctrl = action_to_ctrl(raw, self.layout)
+        self.data.ctrl[:] = ctrl
+        for _ in range(config.DECIMATION):
+            mujoco.mj_step(self.model, self.data)
+        self._step_count += 1
+
+        state = read_state(self.model, self.data, self.layout)
+        finite = bool(
+            np.isfinite(self.data.qpos).all() and np.isfinite(self.data.qvel).all()
+        )
+
+        fallen = False
+        if not finite:
+            fallen = True
+        elif self.stage_config.reset_mode == "stand":
+            fallen = is_fallen(state) or out_of_bounds(state)
+
+        # standup：以"连续站立 0.5 s"为成功；躺倒阶段不判跌倒。
+        success = False
+        if self.stage_config.reset_mode == "standup":
+            if self._started_below_stand and is_standing(state, self.layout):
+                self._success_streak += 1
+            else:
+                self._success_streak = 0
+            success = self._success_streak >= config.SUCCESS_HOLD_STEPS
+            if not finite:
+                fallen = True
+        else:
+            self._success_streak = 0
+
+        phi = potential(state, self.layout) if self.stage == "standup" else 0.0
+        # 先推进步态时钟再算奖励，保证奖励里的摆动足相位与观测一致
+        obs = self.obs_builder.build(
+            state, self._command, gait=self.stage_config.gait
+        )
+        phase_now = self.obs_builder.phase if self.stage_config.gait else 0.0
+        reward, terms = compute_reward(
+            self.stage,
+            state,
+            raw,
+            self._prev_action,
+            self._command,
+            self.layout,
+            phase=phase_now,
+            phi=phi,
+            phi_prev=self._phi_prev if self.stage == "standup" else None,
+            success=success,
+            fallen=fallen,
+        )
+        self._phi_prev = phi
+        self._last_terms = terms
+
+        # 课程用的"能力达标"统计
+        self._track_curriculum_metrics(state, terms, fallen)
+
+        terminated = bool(fallen or success)
+        truncated = bool(
+            not terminated and self._step_count >= self.max_episode_steps
+        )
+
+        self.obs_builder.push_action(raw)
+        self._prev_action = raw
+
+        info = self._make_info(state, success=success, fallen=fallen)
+        info["reward_terms"] = terms
+        info["TimeLimit.truncated"] = truncated
+
+        if terminated or truncated:
+            episode_success = self._episode_outcome(success)
+            info["episode_success"] = episode_success
+            info["curriculum"] = self.curriculum.state().__dict__
+            if not self._episode_closed:
+                self.curriculum.on_episode(episode_success)
+                self._episode_closed = True
+
+        return obs, float(reward), terminated, truncated, info
+
+    def _track_curriculum_metrics(
+        self, state, terms: dict[str, float], fallen: bool
+    ) -> None:
+        """累计"这一步算不算达标"，episode 结束时再判定成败。"""
+        if fallen:
+            return
+        if self.stage == "lift":
+            target = 0 if self._command[config.CMD_TARGET_FOOT] < 0 else 1
+            wanted = float(self._command[config.CMD_LIFT_H])
+            if state.foot_z[target] >= 0.8 * wanted and state.contact[1 - target]:
+                self._lift_reached_steps += 1
+        elif self.stage == "walk":
+            self._vel_track_sum += terms.get("vel_track", 0.0)
+        elif self.stage == "stand":
+            self._height_term_sum += terms.get("height", 0.0)
+
+    def _episode_outcome(self, success_now: bool) -> bool:
+        """把阶段指标折算成课程意义上的"成功"。"""
+        steps = max(self._step_count, 1)
+        if self.stage == "lift":
+            self._episode_success = (
+                self._lift_reached_steps >= config.SUCCESS_HOLD_STEPS
+            )
+        elif self.stage == "walk":
+            self._episode_success = self._vel_track_sum / steps > 0.60
+        elif self.stage == "stand":
+            self._episode_success = self._height_term_sum / steps > 0.50
+        else:
+            self._episode_success = bool(self._episode_success or success_now)
+        return bool(self._episode_success)
+
+    def _make_info(self, state, *, success: bool, fallen: bool) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "success": bool(success),
+            "fallen": bool(fallen),
+            "base_z": float(state.base_pos[2]),
+            "tilt_deg": float(state.tilt_deg),
+            "contact": state.contact.copy(),
+            "foot_z": state.foot_z.copy(),
+            "command": self._command.copy(),
+            "step": self._step_count,
+            "curriculum": self.curriculum.state().__dict__,
+        }
+
+    # ------------------------------------------------------------------
+    # 其它
+    # ------------------------------------------------------------------
+    def close(self) -> None:
+        self.data = None
+
+    def set_command(self, command: np.ndarray) -> None:
+        """运行端/评测端直接改命令（训练时由 reset 采样）。"""
+        self._command = np.asarray(command, dtype=np.float64).copy()
+
+    @property
+    def command(self) -> np.ndarray:
+        return self._command.copy()
+
+    @property
+    def layout_info(self) -> JointLayout:
+        return self.layout
+
+    def render(self):  # pragma: no cover - 运行端自己做渲染
+        raise NotImplementedError("请用 dino_wbc.render / run/run.py 渲染")

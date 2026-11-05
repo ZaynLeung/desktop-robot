@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from desktop_robot.builder import MODELS_DIR
+from desktop_robot.builder import MODELS_DIR, vec
 from desktop_robot.config import joint_name
 from desktop_robot.dino import (
     DEFAULT_DINO_SPEC,
@@ -28,10 +28,12 @@ EXPECTED_JOINTS = [
     "shoulder_pitch_R",
     "hip_pitch_L",
     "hip_roll_L",
+    "hip_yaw_L",
     "knee_L",
     "ankle_L",
     "hip_pitch_R",
     "hip_roll_R",
+    "hip_yaw_R",
     "knee_R",
     "ankle_R",
     "tail1_yaw",
@@ -40,7 +42,7 @@ EXPECTED_JOINTS = [
     "tail4_pitch",
 ]
 
-#: 期望的轴：俯仰 (0,-1,0)；偏航 (0,0,1)；内外翻左右镜像。
+#: 期望的轴：俯仰 (0,-1,0)；偏航 (0,0,1)；内外翻 x 镜像、脚尖偏航 z 镜像。
 EXPECTED_AXES = {
     "neck_pitch": (0.0, -1.0, 0.0),
     "neck_yaw": (0.0, 0.0, 1.0),
@@ -50,6 +52,8 @@ EXPECTED_AXES = {
     "hip_pitch_R": (0.0, -1.0, 0.0),
     "hip_roll_L": (1.0, 0.0, 0.0),
     "hip_roll_R": (-1.0, 0.0, 0.0),
+    "hip_yaw_L": (0.0, 0.0, 1.0),
+    "hip_yaw_R": (0.0, 0.0, -1.0),
     "knee_L": (0.0, -1.0, 0.0),
     "knee_R": (0.0, -1.0, 0.0),
     "ankle_L": (0.0, -1.0, 0.0),
@@ -63,11 +67,11 @@ EXPECTED_AXES = {
 
 def test_dof_counts():
     spec = DEFAULT_DINO_SPEC
-    assert spec.nq == 23  # 7 自由基座 + 16 个驱动关节
-    assert spec.nv == 22
-    assert spec.nu == 16
-    assert spec.n_bodies == 14  # 尾巴 4 节，body 比上一版多 2 个
-    assert len(spec.joint_names) == 16
+    assert spec.nq == 25  # 7 自由基座 + 18 个驱动关节
+    assert spec.nv == 24
+    assert spec.nu == 18
+    assert spec.n_bodies == 14  # 每条腿的 3 个关节都挂在 thigh body 上，不新增 body
+    assert len(spec.joint_names) == 18
 
 
 def test_joint_order_matches_mjcf_traversal():
@@ -76,7 +80,7 @@ def test_joint_order_matches_mjcf_traversal():
 
 
 def test_joint_axes():
-    """16 个关节的轴：俯仰 / 偏航 / 左右镜像的内外翻。"""
+    """18 个关节的轴：俯仰 / 偏航 / 左右镜像的内外翻与脚尖偏航。"""
     for joint, side in DEFAULT_DINO_SPEC.actuated():
         name = joint_name(joint, side)
         axis = tuple(joint.axis_for(side))
@@ -143,6 +147,19 @@ def test_rendered_structure():
     assert all(v == 0.0 for v in ctrl)
 
 
+def test_head_camera_is_mounted_on_the_head_body():
+    """``cam_head`` 必须写在 head body 里，这样它会随颈 pitch / yaw 一起转。"""
+    spec = DEFAULT_DINO_SPEC
+    root = ET.fromstring(render_dino_xml(spec))
+    head = root.find(".//body[@name='head']")
+    assert head is not None
+    camera = head.find("camera[@name='cam_head']")
+    assert camera is not None, "head body 里缺少 cam_head 相机"
+    assert camera.get("pos") == vec(spec.head_camera_pos)
+    assert camera.get("xyaxes") == spec.head_camera_xyaxes
+    assert float(camera.get("fovy")) == pytest.approx(spec.head_camera_fovy)
+
+
 def test_tail_chain_nesting():
     """4 节尾巴必须串成 tail_1 → tail_2 → tail_3 → tail_4，不能都挂在躯干上。"""
     root = ET.fromstring(render_dino_xml(DEFAULT_DINO_SPEC))
@@ -170,6 +187,7 @@ def test_scene_has_include_ground_and_cameras():
     assert root.find("compiler") is None
     assert root.find(".//geom[@name='floor']") is not None
     camera_names = {c.get("name") for c in root.findall(".//camera")}
+    # cam_head 写在本体 dino.xml 的 head body 里（include 之后才会出现在场景中）
     assert {"front", "iso", "ref"} <= camera_names
 
 

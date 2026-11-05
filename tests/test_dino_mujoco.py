@@ -66,11 +66,36 @@ def test_dino_scene_dimensions(scene_model):
 
 def test_dino_scene_has_ground_lights_and_cameras(scene_model):
     assert mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_GEOM, "floor") >= 0
-    for camera in ("front", "iso", "ref"):
+    for camera in ("front", "iso", "ref", "cam_head"):
         assert (
             mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_CAMERA, camera) >= 0
         ), camera
     assert mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_KEY, "stand") >= 0
+
+
+def test_head_camera_is_mounted_on_the_head_body(scene_model):
+    """``cam_head`` 必须是 ``head`` body 的子元素，这样才会随颈 / 头一起转。"""
+    camera_id = mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_CAMERA, "cam_head")
+    assert camera_id >= 0, "dino_scene.xml 里找不到 cam_head 相机"
+    head_id = mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_BODY, "head")
+    assert scene_model.cam_bodyid[camera_id] == head_id
+    assert scene_model.cam_fovy[camera_id] == pytest.approx(
+        DEFAULT_DINO_SPEC.head_camera_fovy
+    )
+
+
+def test_head_camera_looks_forward_in_stand_pose(scene_model):
+    """站姿下头部相机朝 +x 前方、略微下俯，第一视角能看到前方地面。
+
+    相机视线 = 相机坐标系的 −z 轴；``head_camera_xyaxes`` 让它相对头部下俯 12°，
+    站姿头部净俯仰约 +5.7°，所以世界视线约下俯 6.3°。
+    """
+    data = _fresh_data(scene_model)
+    camera_id = mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_CAMERA, "cam_head")
+    forward = -data.cam_xmat[camera_id].reshape(3, 3)[:, 2]
+    assert forward[0] > 0.95, "cam_head 没有朝前看"
+    assert abs(forward[1]) < 0.05, "站姿下头部相机不应该有侧偏"
+    assert forward[2] < -0.05, "cam_head 应该略微下俯，否则第一视角里只剩天空"
 
 
 def test_dino_actuators_cover_all_joints(scene_model):
@@ -124,6 +149,32 @@ def test_new_hip_roll_is_outward_on_both_sides(scene_model):
     assert _body_pos(scene_model, data, "foot_R")[1] < foot_r0[1] - 0.02
 
 
+def test_hip_yaw_turns_the_toes_outward_on_both_sides(scene_model):
+    """hip_yaw 正角 = 脚尖外旋：左腿 foot 前向轴 y 变正、右腿变负。
+
+    约定见 ``DinoSpec.hip_yaw``：左腿轴 ``(0,0,1)``、右腿轴 ``(0,0,-1)``（z 镜像），
+    所以两腿给同一个正角度时，脚尖都朝各自外侧转（左 +y、右 −y）。
+    """
+    for side, sign in (("L", 1.0), ("R", -1.0)):
+        data = _fresh_data(scene_model)
+        foot_id = mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_BODY, f"foot_{side}")
+        toe_id = mujoco.mj_name2id(
+            scene_model, mujoco.mjtObj.mjOBJ_GEOM, f"toe_geom_{side}1"
+        )
+        # foot body 的 x 轴就是脚掌前向；站姿下脚掌正对前方（y 分量≈0）
+        before = data.xmat[foot_id].reshape(3, 3)[:, 0].copy()
+        toe_before = data.geom_xpos[toe_id].copy()
+        assert abs(before[1]) < 0.02
+
+        _set_joint(scene_model, data, f"hip_yaw_{side}", 0.40)
+        after = data.xmat[foot_id].reshape(3, 3)[:, 0]
+        assert sign * after[1] > 0.15, f"{side} 腿 hip_yaw 正角没有把脚尖转向外侧"
+
+        # 前趾离踝关节有 x 偏移，所以脚尖也会向该侧明显平移
+        toe_after = data.geom_xpos[toe_id]
+        assert sign * (toe_after[1] - toe_before[1]) > 0.005
+
+
 def test_new_tail_yaw_swings_the_tail_sideways(scene_model):
     data = _fresh_data(scene_model)
     tail0 = _body_pos(scene_model, data, "tail_4")
@@ -158,4 +209,4 @@ def test_new_tail_pitch_bends_the_tail_down(scene_model):
 def test_dino_holding_stand_keeps_base_height():
     stats = sim.run_headless(MODELS_DIR / "dino_scene.xml", steps=500)
     assert abs(stats["z_drift"]) < 0.02, f"基座漂移 {stats['z_drift']:+.4f} m"
-    assert stats["z_min"] > 0.15
+    assert stats["z_min"] > solve_base_z(DEFAULT_DINO_SPEC) - 0.05

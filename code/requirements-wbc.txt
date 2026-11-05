@@ -1,0 +1,17 @@
+# 小恐龙 WBC 的训练/运行额外依赖
+#
+# 安装到固定环境：E:\conda_envs\desktop-robot
+#
+# 1) torch 必须用 cu128 及以上轮子（RTX 5060 Laptop 是 sm_120，cu126 及以下跑不起来）：
+#    E:\conda_envs\desktop-robot\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+#
+# 2) 其余：
+#    E:\conda_envs\desktop-robot\python.exe -m pip install -r code/requirements-wbc.txt
+#
+# 3) 自检：
+#    E:\conda_envs\desktop-robot\python.exe -c "import torch;print(torch.__version__, torch.cuda.is_available())"
+
+torch>=2.8
+stable-baselines3==2.9.2
+tensorboard>=2.16
+opencv-python>=4.9

@@ -197,3 +197,12 @@ build/
 mjkey.txt
 *.log
 
+# ---- 小恐龙 WBC（code/）的训练 / 运行产物 ----
+code/checkpoints/
+code/runs/
+code/videos/
+code/*.pt
+code/**/policy.pt
+code/**/model.zip
+code/**/best_model.zip
+

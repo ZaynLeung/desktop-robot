@@ -8,7 +8,7 @@ EESM 5800「桌面伴侣机器人」课程项目的仿真工程。
 | 机型 | 造型 | 驱动关节 | 站立高度 | 总质量 | `nq / nv / nu` | 模型文件 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `desktop_biped` | 腰部 + 双足 | 9 | ≈ 0.310 m | ≈ 1.51 kg | 16 / 15 / 9 | `models/biped.xml` |
-| `desktop_dino` | 霸王龙（头 + 双臂 + 双足 + 4 节尾） | 16 | ≈ 0.377 m | ≈ 4.20 kg | 23 / 22 / 16 | `models/dino.xml` |
+| `desktop_dino` | 霸王龙（头 + 双臂 + 双足 + 4 节尾 + 头部相机） | 18 | ≈ 0.307 m | ≈ 2.00 kg | 25 / 24 / 18 | `models/dino.xml` |
 
 设计细节、坐标约定、简化假设见：
 **双足** → [`docs/model_design.md`](docs/model_design.md)；
@@ -64,6 +64,29 @@ python -m pytest                  # 跑全部测试
 
 ---
 
+## 小恐龙 WBC 控制工程（`code/`）
+
+`code/` 里是一套完整的强化学习全身控制（WBC）工程：**站立并分别抬左右脚 → 仰卧/侧躺翻正起身 → 前后左右行走**。
+要点：
+
+* 训练端（`code/train/`，PPO + Stable-Baselines3）与运行端（`code/run/`，CPU 推理）完全分离；
+* 控制器统一接口，运行端只按名字/路径加载不同 checkpoint（`code/registry.json`）；
+* 运行画面 = 第三人称跟随 + 头部第一视角（`cam_head` 绑定 head body）双画面，可录制 mp4；
+* 策略是 2×256 MLP，CPU 即可实时跑；训练可走 GPU，但物理在 CPU。
+
+```powershell
+$py = "E:\conda_envs\desktop-robot\python.exe"
+
+& $py code/train/train.py --stage lift --check          # 不训练，只自检环境
+& $py code/train/train.py --stage lift --envs 16 --device auto
+& $py code/train/evaluate.py --controller lift --episodes 20
+& $py code/run/run.py --controller lift                 # 双画面实时运行
+```
+
+安装、三阶段课程、按键、契约哈希与排障见 **[code/README.md](code/README.md)**。
+
+---
+
 ## 目录结构
 
 ```
@@ -80,7 +103,7 @@ desktop/
 ├─ models/                   生成物，提交入库（没有 Python 也能直接导入 MuJoCo）
 │  ├─ biped.xml              双足本体（8 body / 9 关节 / 9 执行器 / stand 关键帧）
 │  ├─ scene.xml              include biped.xml + 地面 + 天空盒 + 灯光 + 两个机位 + 求解器设置
-│  ├─ dino.xml               恐龙本体（14 body / 16 关节 / 16 执行器 / stand 关键帧）
+│  ├─ dino.xml               恐龙本体（14 body / 18 关节 / 18 执行器 / stand 关键帧 / cam_head 头部相机）
 │  └─ dino_scene.xml         include dino.xml + 地面 + 灯光 + front / iso / ref 三个机位
 │
 ├─ tests/                    pytest
@@ -91,7 +114,7 @@ desktop/
 │  ├─ test_committed_models.py  双足生成物必须与参数源同步
 │  ├─ test_dino.py           恐龙参数自洽性、尺寸可调性、生成物同步
 │  ├─ test_mujoco_load.py    双足模型真正加载 + 短时仿真（无 MuJoCo 时 skip）
-│  └─ test_dino_mujoco.py    恐龙模型加载 / 站姿 / 稳定性（无 MuJoCo 时 skip）
+│  └─ test_dino_mujoco.py    恐龙模型加载 / 站姿 / 新关节动作 / 头部相机 / 稳定性（无 MuJoCo 时 skip）
 │
 ├─ docs/
 │  ├─ model_design.md        双足模型设计说明：坐标、关节表、碰撞、假设
@@ -133,18 +156,21 @@ pelvis ──waist_yaw───────────────────�
 
 ```
 torso（浮动基座）
-├─ head     ① neck_pitch（上下）→ ② neck_yaw（左右，轴 z）
-├─ arm_L/R  ③④ shoulder_pitch_L/R      单段小手臂
-├─ thigh_L/R ⑤⑦ hip_pitch_L/R（主髋）→ ⑥⑧ hip_roll_L/R（内外翻，轴 x）
-│  └─ shank  ⑨⑩ knee_L/R
-│     └─ foot ⑪⑫ ankle_L/R             前趾深灰，和足底一起接触地面
-└─ tail_1   ⑬ tail1_yaw → tail_2 ⑭ tail2_pitch → tail_3 ⑮ tail3_yaw → tail_4 ⑯ tail4_pitch
+├─ head      neck_pitch（上下）→ neck_yaw（左右，轴 z）  + cam_head 头部前视相机
+├─ arm_L/R   shoulder_pitch_L/R      单段小手臂
+├─ thigh_L/R hip_pitch_L/R（主髋）→ hip_roll_L/R（内外翻，轴 x）→ hip_yaw_L/R（脚尖外旋，轴 z）
+│  └─ shank  knee_L/R
+│     └─ foot ankle_L/R              前趾深灰，和足底一起接触地面
+└─ tail_1    tail1_yaw → tail_2 tail2_pitch → tail_3 tail3_yaw → tail_4 tail4_pitch
 ```
 
-* 16 个关节 = 俯仰 10 + 偏航 3（头、尾 1、尾 3）+ 内外翻 2；躯干/髋没有 yaw，仍不能原地转身。
+* 18 个关节 = 俯仰 11 + 偏航 5（头 1、脚尖 2、尾 2）+ 内外翻 2；两条腿的髋 / 脚尖 yaw
+  互为镜像（**同一正角度 = 脚尖外旋**），躯干没有单独的腰 yaw。
 * 足底水平判据：`base_pitch + 髋 + 膝 + 踝 = 0`，站姿里踝角由生成器自动反解。
-* 标称站姿 `stand`：基座高 `0.2541 m`，站高 `0.377 m`；每个 link 的长度都在
+* 标称站姿 `stand`：基座高 `0.1841 m`，站高 `0.307 m`；每个 link 的长度都在
   [`dino.py`](desktop_robot/dino.py) 的 `*_size` 里，改长度会自动带动下游关节。
+* 头部相机 `cam_head` 挂在 `head` body 上（随头转动，相对头部下俯 12°、站姿净视线约下俯
+  6.3°，fovy 75°），第一视角能看到前方地面，可直接用于观测 / 出图。
 
 ---
 
@@ -169,7 +195,7 @@ python -m pytest
 from dataclasses import replace
 from desktop_robot.dino import DEFAULT_DINO_SPEC, write_dino_models
 
-spec = replace(DEFAULT_DINO_SPEC, thigh_size=(0.048, 0.040, 0.110))  # 大腿 90 → 110 mm
+spec = replace(DEFAULT_DINO_SPEC, thigh_size=(0.048, 0.040, 0.060))  # 大腿 50 → 60 mm
 write_dino_models(spec)
 ```
 
@@ -197,12 +223,13 @@ python -m pytest tests/test_dino.py tests/test_dino_mujoco.py
 
 ## 后续可以接的东西
 
-这个工程刻意只做到"模型 + 工具链"，下面这些留作下一步：
+这个工程原来只做到"模型 + 工具链"；下面这些已经在 `code/` 里接上了：
 
 * 逆运动学与步态生成（`kinematics.py` 已有雅可比，可以直接接；恐龙的站姿反解在 `dino.py`）
-* Gymnasium 环境封装（`gymnasium[mujoco]` 已装好，模型可直接注册为环境）
-* 强化学习训练（按需 `pip install stable-baselines3`，torch 体积较大所以没预装）
-* 恐龙的侧向自由度：髋内外翻、头 yaw、尾 yaw 已加；还缺腰 yaw，补上后可以做原地转身和侧向平衡
+* Gymnasium 环境封装 → `code/dino_wbc/env.py`（三阶段：lift / standup / walk）
+* 强化学习训练 → `code/train/`（PPO，课程学习，checkpoint 导出给运行端）
+* 恐龙的侧向自由度：髋内外翻、髋 / 脚尖 yaw、头 yaw、尾 yaw 已加；还缺腰 yaw，
+  补上后原地转身会更自然（现在要转身得靠两腿的 yaw 配合步态）
 * 硬件设计定稿后按实测尺寸替换 `*_size`，重新生成模型即可
 
 ---

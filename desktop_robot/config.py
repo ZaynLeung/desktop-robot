@@ -14,6 +14,8 @@
 膝关节正角度表示"伸展"、负角度表示"屈膝"，因此正常站立时膝角为负值。
 髋外展轴左腿 ``(1, 0, 0)``、右腿 ``(-1, 0, 0)``，两腿都是**正角度 = 外展**，
 这样左右腿的控制量可以直接取相同符号，不需要在控制器里翻号。
+髋偏航（恐龙机型）轴左腿 ``(0, 0, 1)``、右腿 ``(0, 0, -1)``（``mirror_z``），
+两腿正角度都表示**脚尖外旋**，同样不需要翻号。
 """
 
 from __future__ import annotations
@@ -26,6 +28,11 @@ Vec3 = tuple[float, float, float]
 def _flip_x(v: Vec3) -> Vec3:
     """把向量的 x 分量取反（用于左右腿镜像）。"""
     return (-v[0], v[1], v[2])
+
+
+def _flip_z(v: Vec3) -> Vec3:
+    """把向量的 z 分量取反（用于左右腿偏航轴镜像）。"""
+    return (v[0], v[1], -v[2])
 
 
 @dataclass(frozen=True)
@@ -46,12 +53,22 @@ class JointSpec:
     damping: float = 0.05
     frictionloss: float = 0.02
     mirror_x: bool = False
+    mirror_z: bool = False
 
     def axis_for(self, side: str | None) -> Vec3:
-        """返回指定侧的关节轴；右腿且 ``mirror_x`` 为真时取反 x 分量。"""
-        if side == "R" and self.mirror_x:
-            return _flip_x(self.axis)
-        return self.axis
+        """返回指定侧的关节轴；右腿依次应用 ``mirror_x`` / ``mirror_z`` 镜像。
+
+        两种镜像可以同时打开（例如需要同时翻转 x 与 z 的斜轴），
+        默认都为 ``False``，所以对既有双足机型完全向后兼容。
+        """
+        if side != "R":
+            return self.axis
+        axis = self.axis
+        if self.mirror_x:
+            axis = _flip_x(axis)
+        if self.mirror_z:
+            axis = _flip_z(axis)
+        return axis
 
 
 @dataclass(frozen=True)
@@ -192,6 +209,7 @@ def _joint(
     kv: float,
     forcerange: float,
     mirror_x: bool = False,
+    mirror_z: bool = False,
 ) -> JointSpec:
     return JointSpec(
         name=name,
@@ -201,6 +219,7 @@ def _joint(
         kv=kv,
         forcerange=forcerange,
         mirror_x=mirror_x,
+        mirror_z=mirror_z,
     )
 
 

@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-TMP_ROOT = ROOT / "build" / "pytest-tmp"
+TMP_ROOT = ROOT / "build" / "wbc-pytest-tmp"
 
 
 @pytest.fixture()

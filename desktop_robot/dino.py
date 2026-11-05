@@ -1,24 +1,29 @@
-﻿"""桌面恐龙（T-rex 造型）机器人的参数化 MuJoCo 模型生成器。
+"""桌面恐龙（T-rex 造型）机器人的参数化 MuJoCo 模型生成器。
 
 参数源在 :class:`DinoSpec` / :data:`DEFAULT_DINO_SPEC`，模型文件
 ``models/dino.xml`` 与 ``models/dino_scene.xml`` 是它的确定性生成物。
 
-拓扑（16 个驱动关节：俯仰 pitch / 偏航 yaw / 内外翻 roll）：::
+拓扑（18 个驱动关节：俯仰 pitch 11 / 偏航 yaw 5 / 内外翻 roll 2）：::
 
     torso（浮动基座，freejoint: root）
     ├─ head          neck_pitch ①（上下） → neck_yaw ②（左右，轴 z）
+    │                └─ 相机 cam_head（头部前视相机，随头一起转）
     ├─ arm_L         shoulder_pitch_L ③（上下）
     ├─ arm_R         shoulder_pitch_R ④（上下）
     ├─ thigh_L       hip_pitch_L ⑤（主髋，上下） → hip_roll_L ⑥（内外翻，轴 x）
-    │  └─ shank_L    knee_L ⑨
-    │     └─ foot_L  ankle_L ⑪
-    ├─ thigh_R       hip_pitch_R ⑦ → hip_roll_R ⑧
-    │  └─ shank_R    knee_R ⑩
-    │     └─ foot_R  ankle_R ⑫
-    └─ tail_1        tail1_yaw ⑬（侧向，轴 z）
-       └─ tail_2     tail2_pitch ⑭（上下）
-          └─ tail_3  tail3_yaw ⑮（侧向，轴 z）
-             └─ tail_4 tail4_pitch ⑯（上下）
+    │  │                                        → hip_yaw_L ⑦（脚尖外旋，轴 z）
+    │  └─ shank_L    knee_L ⑧
+    │     └─ foot_L  ankle_L ⑨
+    ├─ thigh_R       hip_pitch_R ⑩ → hip_roll_R ⑪ → hip_yaw_R ⑫
+    │  └─ shank_R    knee_R ⑬
+    │     └─ foot_R  ankle_R ⑭
+    └─ tail_1        tail1_yaw ⑮（侧向，轴 z）
+       └─ tail_2     tail2_pitch ⑯（上下）
+          └─ tail_3  tail3_yaw ⑰（侧向，轴 z）
+             └─ tail_4 tail4_pitch ⑱（上下）
+
+每条腿都是 5 个关节：主髋 pitch → 内外翻 roll → 脚尖 yaw → 膝 → 踝。
+「脚尖 yaw」是本版相对参考图新增的自由度，用来让脚掌相对腿转向。
 
 **每个连杆的长度都由对应 ``*_size`` 的相应分量决定**，改长度后关节/几何偏移
 会自动跟着重算，不需要手工同步：
@@ -41,9 +46,12 @@
 * 俯仰（上下）：轴 ``(0, -1, 0)``，正角 = 子连杆向前摆；对朝后的尾巴，正角 = 尾尖下压。
 * 偏航（左右）：轴 ``(0, 0, 1)``，正角 = 从上往下看逆时针（头部向左、尾尖向右）。
 * 内外翻：左腿轴 ``(1, 0, 0)``、右腿轴 ``(-1, 0, 0)``，两腿正角都表示外翻。
+* 脚尖偏航：左腿轴 ``(0, 0, 1)``、右腿轴 ``(0, 0, -1)``（``JointSpec.mirror_z`` 镜像），
+  **两腿正角都表示脚尖外旋**（左脚尖转向 +y、右脚尖转向 −y），控制器同样不用翻号。
 
 轴写在关节所在 body 的局部坐标系里，会随上游关节一起转；同一个 body 里多个关节
-按定义顺序复合，所以「髋 pitch → 内外翻 roll」「头 pitch → yaw」都按这副顺序生效。
+按定义顺序复合，所以「髋 pitch → 内外翻 roll → 脚尖 yaw」「头 pitch → yaw」都按
+这副顺序生效。
 
 模型的**零位就是标称站姿**：每个 body 的 ``quat`` 烘了它所有关节的站姿角
 （颈/肩/髋/膝/踝/尾），躯干 body 的 ``pos`` / ``quat`` 是站姿的基座高度与抬头角。
@@ -96,6 +104,7 @@ _CAPS: dict[str, tuple[float, float]] = {
     "shoulder_pitch": (0.014, 0.019),
     "hip_pitch": (0.016, 0.024),
     "hip_roll": (0.015, 0.022),
+    "hip_yaw": (0.015, 0.022),
     "knee": (0.014, 0.021),
     "ankle": (0.012, 0.017),
     "tail1_yaw": (0.012, 0.018),
@@ -113,6 +122,7 @@ def _joint(
     kv: float = 1.0,
     forcerange: float = 2.5,
     mirror_x: bool = False,
+    mirror_z: bool = False,
 ) -> JointSpec:
     """构造一个单轴铰链；默认是俯仰轴，可换成 yaw / roll。"""
     return JointSpec(
@@ -123,6 +133,7 @@ def _joint(
         kv=kv,
         forcerange=forcerange,
         mirror_x=mirror_x,
+        mirror_z=mirror_z,
     )
 
 
@@ -143,6 +154,15 @@ class DinoSpec:
     head_size: Vec3 = (0.100, 0.072, 0.055)
     neck_pos: Vec3 = (0.055, 0.0, 0.050)
     head_offset: Vec3 = (0.032, 0.0, 0.022)
+
+    # ---- 头部相机：挂在 head body 上，随颈/头一起转（第一人称观测用）----
+    # pos 相对 head body 原点，贴在头部前方脸上；xyaxes = (相机 x 轴, 相机 y 轴)，
+    # 相机沿 −z 看：x = (0,−1,0)（画面右方 = −y）、y = (sin12°, 0, cos12°)，
+    # 于是视轴 = (cos12°, 0, −sin12°)，即朝 +x 前方、相对头部下俯 12°。
+    # 站姿下头部净俯仰约 +5.7°，所以相机世界视线约下俯 6.3°，能看到更多前方地面。
+    head_camera_pos: Vec3 = (0.086, 0.0, 0.026)
+    head_camera_xyaxes: str = "0 -1 0 0.2079 0 0.9781"
+    head_camera_fovy: float = 75.0
 
     # ---- 臂：单段，无肘/手 ----
     arm_size: Vec3 = (0.045, 0.032, 0.075)
@@ -179,6 +199,11 @@ class DinoSpec:
             "hip_roll", (-0.35, 0.35), axis=ROLL, mirror_x=True
         )
     )
+    hip_yaw: JointSpec = field(
+        default_factory=lambda: _joint(
+            "hip_yaw", (-0.60, 0.60), axis=YAW, mirror_z=True
+        )
+    )
     knee: JointSpec = field(default_factory=lambda: _joint("knee", (-1.60, 0.05)))
     ankle: JointSpec = field(
         default_factory=lambda: _joint("ankle", (-0.60, 0.80), forcerange=2.0)
@@ -205,6 +230,7 @@ class DinoSpec:
     stand_shoulder: float = -0.15
     stand_hip: float = -0.30
     stand_hip_roll: float = 0.0
+    stand_hip_yaw: float = 0.0
     stand_knee: float = -0.10
     stand_tail1_yaw: float = 0.0
     stand_tail2_pitch: float = 0.18
@@ -268,7 +294,8 @@ class DinoSpec:
         """按 MuJoCo qpos 顺序返回 (关节参数, 侧别)。
 
         顺序 = body 深度优先遍历 + body 内关节定义顺序：
-        颈 pitch → 颈 yaw → 左肩 → 右肩 → 左腿 4 个 → 右腿 4 个 → 尾 4 个。
+        颈 pitch → 颈 yaw → 左肩 → 右肩 →
+        左腿 5 个（pitch → roll → yaw → knee → ankle）→ 右腿 5 个 → 尾 4 个。
         """
         return [
             (self.neck, None),
@@ -277,10 +304,12 @@ class DinoSpec:
             (self.shoulder, "R"),
             (self.hip, "L"),
             (self.hip_roll, "L"),
+            (self.hip_yaw, "L"),
             (self.knee, "L"),
             (self.ankle, "L"),
             (self.hip, "R"),
             (self.hip_roll, "R"),
+            (self.hip_yaw, "R"),
             (self.knee, "R"),
             (self.ankle, "R"),
             (self.tail1_yaw, None),
@@ -358,13 +387,14 @@ class DinoSpec:
             q[f"shoulder_pitch_{side}"] = self.stand_shoulder
             q[f"hip_pitch_{side}"] = self.stand_hip
             q[f"hip_roll_{side}"] = self.stand_hip_roll
+            q[f"hip_yaw_{side}"] = self.stand_hip_yaw
             q[f"knee_{side}"] = self.stand_knee
             q[f"ankle_{side}"] = self.stand_ankle
         return q
 
 
 # ----------------------------------------------------------------------
-# 默认机型：约 0.33 m 高、约 2.3 kg 的桌面恐龙
+# 默认机型：约 0.31 m 高、约 2.0 kg 的桌面恐龙
 # ----------------------------------------------------------------------
 DEFAULT_DINO_SPEC = DinoSpec()
 
@@ -391,7 +421,11 @@ def _corners(center, size: Vec3, rot: np.ndarray) -> np.ndarray:
 def leg_boxes(
     spec: DinoSpec, side: str, hip: float, knee: float, ankle: float
 ) -> list[tuple[np.ndarray, Vec3, np.ndarray]]:
-    """单腿 FK：返回足 box 与两个前趾的 ``(中心, 尺寸, 旋转)``，均在躯干坐标系。"""
+    """单腿 FK：返回足 box 与两个前趾的 ``(中心, 尺寸, 旋转)``，均在躯干坐标系。
+
+    只算矢状面内的三个 pitch 关节。站姿里髋内外翻 / 脚尖 yaw 的站姿角都是 0，
+    在这里（用来反解站立高度）等价于单位旋转，所以不需要展开三维链路。
+    """
     sign = 1.0 if side == "L" else -1.0
     rot = _rot_pitch(hip)
     p = np.array(
@@ -495,7 +529,7 @@ def _body_quat(*axis_angles: tuple[Vec3, float]) -> str:
 def stand_qpos(spec: DinoSpec) -> list[float]:
     """``stand`` 关键帧的完整 qpos。
 
-    基座取站姿的高度/抬头角，11 个关节角全 0——因为模型的零位已经是站姿了。
+    基座取站姿的高度/抬头角，18 个关节角全 0——因为模型的零位已经是站姿了。
     """
     return [
         0.0,
@@ -619,9 +653,10 @@ def _add_joint(
 def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
     """挂一条腿：thigh → shank → foot（foot 上再挂两个前趾）。
 
-    thigh body 上有两个关节，按「主髋 pitch → 内外翻 roll」的顺序；
-    body 的 ``quat`` 烘的是这两个关节的站姿旋转，所以 qpos 全 0 时这条腿正好
-    是标称站姿（髋 pitch = ``stand_hip``、内外翻 = ``stand_hip_roll``）。
+    thigh body 上有三个关节，按「主髋 pitch → 内外翻 roll → 脚尖 yaw」的顺序；
+    body 的 ``quat`` 烘的是这三个关节的站姿旋转，所以 qpos 全 0 时这条腿正好
+    是标称站姿（髋 pitch = ``stand_hip``、内外翻 = ``stand_hip_roll``、
+    脚尖 yaw = ``stand_hip_yaw``）。
     """
     hip = (spec.hip_pos[0], sign * spec.hip_pos[1], spec.hip_pos[2])
     thigh = ET.SubElement(
@@ -633,11 +668,13 @@ def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
             "quat": _body_quat(
                 (spec.hip.axis_for(side), spec.stand_hip),
                 (spec.hip_roll.axis_for(side), spec.stand_hip_roll),
+                (spec.hip_yaw.axis_for(side), spec.stand_hip_yaw),
             ),
         },
     )
     _add_joint(thigh, spec.hip, side, spec)
     _add_joint(thigh, spec.hip_roll, side, spec)
+    _add_joint(thigh, spec.hip_yaw, side, spec)
     ET.SubElement(
         thigh,
         "geom",
@@ -777,6 +814,17 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
             contype=2,
             conaffinity=1,
         ),
+    )
+    # ---- 头部相机 cam_head：挂在 head body 上，随颈 pitch / yaw 一起转 ----
+    ET.SubElement(
+        head,
+        "camera",
+        {
+            "name": "cam_head",
+            "pos": vec(spec.head_camera_pos),
+            "xyaxes": spec.head_camera_xyaxes,
+            "fovy": fnum(spec.head_camera_fovy),
+        },
     )
 
     # ---- 两臂：单段，肩关节在躯干侧前方 ----
@@ -1126,6 +1174,28 @@ def verify_dino_static(
         if mask != expected:
             report.errors.append(f"{name} 的碰撞掩码应为 {expected[0]}/{expected[1]}，实际为 {mask}")
 
+    # ---- 头部相机：必须挂在 head body 里（这样它会随颈 / 头一起转）----
+    head_body = robot_root.find(".//body[@name='head']")
+    camera = head_body.find("camera[@name='cam_head']") if head_body is not None else None
+    if camera is None:
+        report.errors.append("dino.xml 的 head body 里缺少 cam_head 相机")
+    else:
+        actual_pos = [float(v) for v in (camera.get("pos") or "").split()]
+        if len(actual_pos) != 3 or any(
+            abs(a - b) > 1e-6 for a, b in zip(actual_pos, spec.head_camera_pos)
+        ):
+            report.errors.append(
+                f"cam_head 的 pos 应为 {spec.head_camera_pos}，实际 {actual_pos}"
+            )
+        if camera.get("xyaxes") != spec.head_camera_xyaxes:
+            report.errors.append(
+                f"cam_head 的 xyaxes 应为 {spec.head_camera_xyaxes!r}，"
+                f"实际 {camera.get('xyaxes')!r}"
+            )
+        fovy = camera.get("fovy")
+        if fovy is None or abs(float(fovy) - spec.head_camera_fovy) > 1e-6:
+            report.errors.append(f"cam_head 的 fovy 应为 {spec.head_camera_fovy}，实际 {fovy}")
+
     # 场景：include 本体、不能再写 compiler、必须有地板
     include = scene_root.find("include")
     if include is None or include.get("file") != "dino.xml":
@@ -1144,4 +1214,5 @@ def verify_dino_static(
     report.info["总质量"] = f"≈ {spec.total_mass():.3f} kg"
     report.info["基座高度"] = f"{solve_base_z(spec):.4f} m"
     report.info["站立高度"] = f"{head_top_z(spec):.4f} m"
+    report.info["头部相机"] = "cam_head（head body）"
     return report

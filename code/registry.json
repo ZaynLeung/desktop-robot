@@ -1,0 +1,19 @@
+{
+  "stand": {
+    "stage": "stand",
+    "checkpoint": "checkpoints/stand/policy.pt"
+  },
+  "lift": {
+    "stage": "lift",
+    "checkpoint": "checkpoints/lift_20261106_003426/policy.pt",
+    "contract_hash": "516595fa06087be5"
+  },
+  "standup": {
+    "stage": "standup",
+    "checkpoint": "checkpoints/standup/policy.pt"
+  },
+  "walk": {
+    "stage": "walk",
+    "checkpoint": "checkpoints/walk/policy.pt"
+  }
+}

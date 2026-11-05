@@ -1,0 +1,89 @@
+"""状态量提取与 80 维观测布局。"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+mujoco = pytest.importorskip("mujoco", reason="未安装 mujoco")
+
+from dino_wbc import config, model_io  # noqa: E402
+from dino_wbc.observation import ObsBuilder, make_command  # noqa: E402
+from dino_wbc.state import read_state, reset_to_stand  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def model_layout():
+    return model_io.load()
+
+
+@pytest.fixture
+def rig(model_layout):
+    model, layout = model_layout
+    data = mujoco.MjData(model)
+    reset_to_stand(model, data, layout)
+    mujoco.mj_forward(model, data)
+    return model, layout, data
+
+
+def test_stand_state_is_upright(rig):
+    model, layout, data = rig
+    state = read_state(model, data, layout)
+    # 标称站姿本身抬头 20°，重力在体坐标系里是 (-sin20, 0, -cos20)
+    expected_gravity = np.array(
+        [-np.sin(np.radians(20.0)), 0.0, -np.cos(np.radians(20.0))]
+    )
+    assert state.tilt_deg < 0.5  # 相对标称站姿的偏差
+    assert np.allclose(state.gravity_b, expected_gravity, atol=0.02)
+    assert np.allclose(state.q, 0.0, atol=1e-9)
+    assert state.base_pos[2] == pytest.approx(layout.stand_base_z, abs=1e-6)
+    assert state.foot_z.shape == (2,)
+    assert state.foot_z.min() > -0.01  # 站姿足底贴地
+
+
+def test_base_velocity_is_expressed_in_body_frame(rig):
+    model, layout, data = rig
+    angle = np.pi / 2.0
+    data.qpos[3:7] = [np.cos(angle / 2), 0.0, 0.0, np.sin(angle / 2)]  # 绕 z 转 90°
+    data.qvel[0:3] = [1.0, 0.0, 0.0]  # 世界系 +x
+    data.qvel[3:6] = [0.0, 0.0, 1.0]  # 本体系角速度
+    mujoco.mj_forward(model, data)
+    state = read_state(model, data, layout)
+    # 世界 +x 在体坐标系里是 -y
+    assert np.allclose(state.base_lin_vel_b, [0.0, -1.0, 0.0], atol=1e-9)
+    assert np.allclose(state.base_ang_vel_b, [0.0, 0.0, 1.0], atol=1e-9)
+
+
+def test_obs_layout_and_scaling(rig):
+    model, layout, data = rig
+    state = read_state(model, data, layout)
+    command = make_command("walk", vx=0.1, vy=-0.05)
+    obs = ObsBuilder(layout).build(state, command, gait=True)
+
+    assert obs.shape == (config.OBS_DIM,)
+    assert obs.dtype == np.float32
+    assert np.isfinite(obs).all()
+
+    # base 块
+    assert obs[0] == pytest.approx(0.0, abs=1e-5)
+    expected_gravity = np.array(
+        [-np.sin(np.radians(20.0)), 0.0, -np.cos(np.radians(20.0))]
+    )
+    assert np.allclose(obs[1:4], expected_gravity, atol=0.02)
+    # joints 块：站姿全 0
+    assert np.allclose(obs[10:46], 0.0, atol=1e-6)
+    # command 块
+    assert obs[config.OBS_DIM - config.OBS_PHASE_DIM - config.OBS_COMMAND_DIM + 4] == pytest.approx(1.0)
+    assert obs[config.OBS_DIM - config.OBS_PHASE_DIM - config.OBS_COMMAND_DIM + 5] == pytest.approx(-0.5)
+    # phase 块非零
+    assert not np.allclose(obs[-2:], 0.0)
+
+
+def test_obs_is_clipped(rig):
+    model, layout, data = rig
+    data.qvel[0:3] = [50.0, -50.0, 0.0]
+    data.qvel[3:6] = [100.0, -100.0, 0.0]
+    mujoco.mj_forward(model, data)
+    state = read_state(model, data, layout)
+    obs = ObsBuilder(layout).build(state, make_command("stand"), gait=False)
+    assert np.max(np.abs(obs)) <= max(config.JOINT_VEL_CLIP, config.BASE_ANG_VEL_CLIP) + 1e-6

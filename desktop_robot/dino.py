@@ -1,7 +1,8 @@
 """桌面恐龙（T-rex 造型）机器人的参数化 MuJoCo 模型生成器。
 
-参数源在 :class:`DinoSpec` / :data:`DEFAULT_DINO_SPEC`，模型文件
-``models/dino.xml`` 与 ``models/dino_scene.xml`` 是它的确定性生成物。
+参数源在 :class:`DinoSpec` / :data:`DEFAULT_DINO_SPEC` 与
+:class:`DinoEnvSpec` / :data:`DEFAULT_DINO_ENV_SPEC`，模型文件
+``models/dino.xml`` 与 ``models/dino_scene.xml`` 是它们的确定性生成物。
 
 拓扑（18 个驱动关节：俯仰 pitch 11 / 偏航 yaw 5 / 内外翻 roll 2）：::
 
@@ -398,6 +399,36 @@ class DinoSpec:
 # 默认机型：约 0.31 m 高、约 2.0 kg 的桌面恐龙
 # ----------------------------------------------------------------------
 DEFAULT_DINO_SPEC = DinoSpec()
+
+
+@dataclass(frozen=True)
+class DinoEnvSpec:
+    """恐龙场景环境参数（米）。
+
+    ``wall_length`` 表示被围起来的正方形场地边长；``wall_height`` 是围墙全高。
+    围墙厚度先固定成 4 cm，避免把环境参数铺得太开。
+    """
+
+    wall_length: float = 10.00
+    wall_height: float = 0.40
+    wall_thickness: float = 0.04
+
+    @property
+    def wall_geoms(self) -> tuple[tuple[str, Vec3, Vec3], ...]:
+        """四面围墙的 ``(name, pos, size)``，均按 MJCF 的 box 全尺寸推导。"""
+        half_length = self.wall_length / 2.0
+        half_height = self.wall_height / 2.0
+        half_thickness = self.wall_thickness / 2.0
+        wall_offset = half_length + half_thickness
+        return (
+            ("wall_north", (0.0, wall_offset, half_height), (self.wall_length, self.wall_thickness, self.wall_height)),
+            ("wall_south", (0.0, -wall_offset, half_height), (self.wall_length, self.wall_thickness, self.wall_height)),
+            ("wall_east", (wall_offset, 0.0, half_height), (self.wall_thickness, self.wall_length, self.wall_height)),
+            ("wall_west", (-wall_offset, 0.0, half_height), (self.wall_thickness, self.wall_length, self.wall_height)),
+        )
+
+
+DEFAULT_DINO_ENV_SPEC = DinoEnvSpec()
 
 
 # ----------------------------------------------------------------------
@@ -981,8 +1012,11 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     return root
 
 
-def build_dino_scene(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
-    """构造恐龙场景：``<include file="dino.xml"/>`` + 地面/灯光/机位。
+def build_dino_scene(
+    spec: DinoSpec = DEFAULT_DINO_SPEC,
+    env_spec: DinoEnvSpec = DEFAULT_DINO_ENV_SPEC,
+) -> ET.Element:
+    """构造恐龙场景：``<include file="dino.xml"/>`` + 地面/灯光/机位/围墙。
 
     除了通用场景自带的 ``front`` / ``iso`` 机位，再补一个 ``ref`` 机位：
     与参考图接近的右前上方 3/4 视角（远距离 + 窄视场，接近正交投影），
@@ -996,6 +1030,22 @@ def build_dino_scene(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
     )
     world = root.find("worldbody")
     if world is not None:
+        # 围墙尺寸由环境参数统一控制，后面想改场地大小时不需要再手算四面墙。
+        for name, pos, size in env_spec.wall_geoms:
+            ET.SubElement(
+                world,
+                "geom",
+                {
+                    "name": name,
+                    "type": "box",
+                    "pos": vec(pos),
+                    "size": vec(half(size)),
+                    "rgba": "0.42 0.45 0.50 1",
+                    "friction": "1.0 0.02 0.001",
+                    "contype": "1",
+                    "conaffinity": "1",
+                },
+            )
         ET.SubElement(
             world,
             "camera",
@@ -1018,12 +1068,17 @@ def render_dino_xml(spec: DinoSpec = DEFAULT_DINO_SPEC) -> str:
     return _to_text(build_dino(spec))
 
 
-def render_dino_scene_xml(spec: DinoSpec = DEFAULT_DINO_SPEC) -> str:
-    return _to_text(build_dino_scene(spec))
+def render_dino_scene_xml(
+    spec: DinoSpec = DEFAULT_DINO_SPEC,
+    env_spec: DinoEnvSpec = DEFAULT_DINO_ENV_SPEC,
+) -> str:
+    return _to_text(build_dino_scene(spec, env_spec))
 
 
 def write_dino_models(
-    spec: DinoSpec = DEFAULT_DINO_SPEC, out_dir: Path | str = MODELS_DIR
+    spec: DinoSpec = DEFAULT_DINO_SPEC,
+    out_dir: Path | str = MODELS_DIR,
+    env_spec: DinoEnvSpec = DEFAULT_DINO_ENV_SPEC,
 ) -> list[Path]:
     """写出 ``dino.xml`` 与 ``dino_scene.xml``；内容没变就不重写。"""
     out = Path(out_dir)
@@ -1031,7 +1086,7 @@ def write_dino_models(
     written: list[Path] = []
     for filename, text in (
         ("dino.xml", render_dino_xml(spec)),
-        ("dino_scene.xml", render_dino_scene_xml(spec)),
+        ("dino_scene.xml", render_dino_scene_xml(spec, env_spec)),
     ):
         path = out / filename
         if not path.exists() or path.read_text(encoding="utf-8") != text:
@@ -1060,7 +1115,9 @@ def _check_duplicates(report: Report, names: list[str], kind: str) -> None:
 
 
 def verify_dino_static(
-    spec: DinoSpec = DEFAULT_DINO_SPEC, models_dir: Path | str = MODELS_DIR
+    spec: DinoSpec = DEFAULT_DINO_SPEC,
+    models_dir: Path | str = MODELS_DIR,
+    env_spec: DinoEnvSpec = DEFAULT_DINO_ENV_SPEC,
 ) -> Report:
     """把生成出来的 ``dino*.xml`` 解析回来，与参数源逐项对照。"""
     report = Report()
@@ -1208,6 +1265,22 @@ def verify_dino_static(
         report.errors.append("dino_scene.xml 缺少 floor 地面")
     elif (floor.get("contype"), floor.get("conaffinity")) != ("1", "1"):
         report.errors.append("floor 的 contype/conaffinity 应为 1/1，否则脚踩不到地面")
+    wall_names = {name for name, _, _ in env_spec.wall_geoms}
+    actual_wall_names = {geom.get("name") for geom in scene_root.findall(".//geom") if geom.get("name")}
+    missing_walls = sorted(wall_names - actual_wall_names)
+    if missing_walls:
+        report.errors.append(f"dino_scene.xml 缺少围墙 geom: {', '.join(missing_walls)}")
+    for name, pos, size in env_spec.wall_geoms:
+        wall = scene_root.find(f".//geom[@name='{name}']")
+        if wall is None:
+            continue
+        if wall.get("pos") != vec(pos):
+            report.errors.append(f"{name} 的 pos 应为 {vec(pos)!r}，实际 {wall.get('pos')!r}")
+        expected_size = vec(half(size))
+        if wall.get("size") != expected_size:
+            report.errors.append(
+                f"{name} 的 size 应为 {expected_size!r}，实际 {wall.get('size')!r}"
+            )
 
     report.info["文件"] = f"{robot_path.name}, {scene_path.name}"
     report.info["规模"] = f"bodies={len(bodies)}, joints={len(hinges)}, actuators={len(actuator_elems)}"

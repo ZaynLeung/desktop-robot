@@ -66,6 +66,8 @@ def test_dino_scene_dimensions(scene_model):
 
 def test_dino_scene_has_ground_lights_and_cameras(scene_model):
     assert mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_GEOM, "floor") >= 0
+    for wall in ("wall_north", "wall_south", "wall_east", "wall_west"):
+        assert mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_GEOM, wall) >= 0, wall
     for camera in ("front", "iso", "ref", "cam_head"):
         assert (
             mujoco.mj_name2id(scene_model, mujoco.mjtObj.mjOBJ_CAMERA, camera) >= 0

@@ -11,7 +11,9 @@ import pytest
 from desktop_robot.builder import MODELS_DIR, vec
 from desktop_robot.config import joint_name
 from desktop_robot.dino import (
+    DEFAULT_DINO_ENV_SPEC,
     DEFAULT_DINO_SPEC,
+    DinoEnvSpec,
     head_top_z,
     render_dino_scene_xml,
     render_dino_xml,
@@ -186,9 +188,29 @@ def test_scene_has_include_ground_and_cameras():
     assert root.find("include").get("file") == "dino.xml"
     assert root.find("compiler") is None
     assert root.find(".//geom[@name='floor']") is not None
+    wall_names = {geom.get("name") for geom in root.findall(".//geom")}
+    assert {"wall_north", "wall_south", "wall_east", "wall_west"} <= wall_names
     camera_names = {c.get("name") for c in root.findall(".//camera")}
     # cam_head 写在本体 dino.xml 的 head body 里（include 之后才会出现在场景中）
     assert {"front", "iso", "ref"} <= camera_names
+
+
+def test_scene_wall_env_spec_controls_wall_size():
+    env_spec = DinoEnvSpec(wall_length=2.0, wall_height=0.6)
+    root = ET.fromstring(render_dino_scene_xml(DEFAULT_DINO_SPEC, env_spec))
+    north = root.find(".//geom[@name='wall_north']")
+    east = root.find(".//geom[@name='wall_east']")
+    assert north is not None and east is not None
+    assert north.get("pos") == "0 1.02 0.3"
+    assert north.get("size") == "1 0.02 0.3"
+    assert east.get("pos") == "1.02 0 0.3"
+    assert east.get("size") == "0.02 1 0.3"
+    assert {name for name, _, _ in DEFAULT_DINO_ENV_SPEC.wall_geoms} == {
+        "wall_north",
+        "wall_south",
+        "wall_east",
+        "wall_west",
+    }
 
 
 def test_rendering_is_deterministic():

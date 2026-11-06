@@ -109,6 +109,10 @@ class DinoWbcEnv(gym.Env):
         #: 朝向/位置持续违规计数（超过 grace 才终止）。
         self._heading_violation = 0
         self._position_violation = 0
+        # ---- walk 速度指令调度 ----
+        #: 手动 set_command() 后锁定，不再被训练用的随机换向覆盖（评测用）。
+        self._command_locked = False
+        self._walk_next_change = 0
         # ---- 外力轻推状态 ----
         self._push_remaining = 0
         self._next_push_step = 0
@@ -131,6 +135,10 @@ class DinoWbcEnv(gym.Env):
         self._target_xy = np.asarray(state.base_pos[:2], dtype=np.float64).copy()
         self._command = self._sample_command()
         self.obs_builder.reset(self._target_xy)
+        self._command_locked = False
+        self._walk_next_change = int(
+            self.rng.integers(*config.WALK_COMMAND_HOLD_RANGE)
+        )
 
         self._prev_action[:] = 0.0
         self._step_count = 0
@@ -248,6 +256,18 @@ class DinoWbcEnv(gym.Env):
         )
         if raw.shape[0] != config.ACTION_DIM:
             raise ValueError(f"动作维度应为 {config.ACTION_DIM}，实际 {raw.shape[0]}")
+
+        # walk：每 1–3 s 换一次速度指令（含停车/倒车/纯侧向），
+        # 让策略见过"加速→停车→倒车→侧移"的切换，而不是整集恒定速度。
+        if (
+            self.stage == "walk"
+            and not self._command_locked
+            and self._step_count >= self._walk_next_change
+        ):
+            self._command = self._sample_command()
+            self._walk_next_change = self._step_count + int(
+                self.rng.integers(*config.WALK_COMMAND_HOLD_RANGE)
+            )
 
         ctrl = action_to_ctrl(raw, self.layout)
         self.data.ctrl[:] = ctrl
@@ -439,7 +459,7 @@ class DinoWbcEnv(gym.Env):
         elif self.stage == "walk":
             self._episode_success = (
                 not self._fell
-            ) and self._vel_track_sum / steps > 0.60
+            ) and self._vel_track_sum / steps > config.WALK_SUCCESS_VEL_TRACK
         elif self.stage == "stand":
             meaningfully_standing = (
                 self._height_term_sum / steps > 0.80
@@ -472,6 +492,8 @@ class DinoWbcEnv(gym.Env):
             "fallen": bool(fallen),
             "base_z": float(state.base_pos[2]),
             "tilt_deg": float(state.tilt_deg),
+            "vx": float(state.base_lin_vel_b[0]),
+            "vy": float(state.base_lin_vel_b[1]),
             "yaw_deg": float(np.degrees(state.yaw_rad)),
             "yaw_cmd_deg": float(np.degrees(self._command[config.CMD_YAW])),
             "heading_error_deg": heading_error_deg,
@@ -502,6 +524,8 @@ class DinoWbcEnv(gym.Env):
     def set_command(self, command: np.ndarray) -> None:
         """运行端/评测端直接改命令（训练时由 reset 采样）。"""
         self._command = np.asarray(command, dtype=np.float64).copy()
+        # 手动指定后锁定，避免 walk 的随机换向把评测/演示指令覆盖掉。
+        self._command_locked = True
 
     @property
     def command(self) -> np.ndarray:

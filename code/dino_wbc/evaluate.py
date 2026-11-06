@@ -23,6 +23,8 @@ def evaluate(
     standup_pose: str = "all",
     lift_h: float | None = None,
     yaw_deg: float | None = None,
+    walk_vx: float | None = None,
+    walk_vy: float | None = None,
 ) -> dict:
     """跑 ``episodes`` 个 episode，返回汇总指标与逐 episode 记录。
 
@@ -30,6 +32,7 @@ def evaluate(
         之间轮换（默认，能看出是哪一档没学会），也可固定成某一档的名字。
     :param lift_h: 仅 lift 阶段有效；给定则覆盖课程的抬脚高度（m）。
     :param yaw_deg: 仅 stand/turn 有效；给定则用固定的绝对朝向指令（度）。
+    :param walk_vx/walk_vy: 仅 walk 有效；给定则固定速度指令（m/s，负=倒车/右移）。
     """
     stage = getattr(controller, "stage", "lift")
     env = DinoWbcEnv(stage, seed=seed, model_path=model_path)
@@ -60,8 +63,18 @@ def evaluate(
             )
         if stage in ("stand", "turn") and yaw_deg is not None:
             env.set_command(make_command(stage, yaw=np.radians(float(yaw_deg))))
+        if stage == "walk" and (walk_vx is not None or walk_vy is not None):
+            env.set_command(
+                make_command(
+                    "walk",
+                    vx=float(walk_vx or 0.0),
+                    vy=float(walk_vy or 0.0),
+                )
+            )
         episode_reward = 0.0
         vel_track_sum = 0.0
+        vx_sum = 0.0
+        vy_sum = 0.0
         steps = 0
         success = False
         fallen = False
@@ -80,6 +93,8 @@ def evaluate(
             obs, reward, terminated, truncated, info = env.step(action)
             episode_reward += reward
             vel_track_sum += info.get("reward_terms", {}).get("vel_track", 0.0)
+            vx_sum += float(info.get("vx", 0.0))
+            vy_sum += float(info.get("vy", 0.0))
             base_z_sum += float(info.get("base_z", 0.0))
             tilt_sum += float(info.get("tilt_deg", 0.0))
             body_steps += int(bool(info.get("body_contact")))
@@ -109,6 +124,8 @@ def evaluate(
                 "base_z": base_z_sum / max(steps, 1),
                 "tilt_deg": tilt_sum / max(steps, 1),
                 "mean_vel_track": vel_track_sum / max(steps, 1),
+                "mean_vx": vx_sum / max(steps, 1),
+                "mean_vy": vy_sum / max(steps, 1),
                 "body_contact_rate": body_steps / max(steps, 1),
                 "tail_contact_rate": tail_steps / max(steps, 1),
                 "support_contact_rate": support_steps / max(steps, 1),
@@ -150,6 +167,8 @@ def evaluate(
         "mean_base_z": float(np.mean([r["base_z"] for r in records])),
         "mean_tilt_deg": float(np.mean([r["tilt_deg"] for r in records])),
         "mean_vel_track": float(np.mean([r["mean_vel_track"] for r in records])),
+        "mean_vx": float(np.mean([r["mean_vx"] for r in records])),
+        "mean_vy": float(np.mean([r["mean_vy"] for r in records])),
         "body_contact_rate": float(
             np.mean([r["body_contact_rate"] for r in records])
         ),

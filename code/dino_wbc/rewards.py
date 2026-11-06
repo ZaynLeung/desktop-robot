@@ -164,17 +164,39 @@ def _lift_terms(
 
 
 def _walk_terms(state: RobotState, command: np.ndarray, phase: float) -> dict[str, float]:
+    """walk 的速度跟踪 + 步态质量。
+
+    速度核从原来的 ``exp(-4e²)``（1/e ≈ 0.5 m/s）改成按 σ 的形式：
+    指令只有 ±0.12 / ±0.06 m/s，旧核几乎饱和，策略不跟踪也拿 0.94。新核对
+    5 cm/s 的误差就已经掉到 0.37，能真正驱动前进/倒车/侧移/停车。
+    """
     vx_err = state.base_lin_vel_b[0] - float(command[config.CMD_VX])
     vy_err = state.base_lin_vel_b[1] - float(command[config.CMD_VY])
+    sigma_x, sigma_y = config.WALK_VEL_SIGMA
+    vel_track = float(
+        np.exp(-((vx_err / sigma_x) ** 2 + (vy_err / sigma_y) ** 2))
+    )
+
     swing = 0 if np.sin(phase) >= 0.0 else 1
+    stance = 1 - swing
     clearance_error = (
         state.foot_z[swing] - config.WALK_FOOT_CLEARANCE
     ) / CLEARANCE_SIGMA
     contacts = int(state.contact.sum())
+    swing_contact = 1.0 if (
+        state.contact[swing] and state.foot_z[swing] < config.WALK_SWING_CONTACT_Z
+    ) else 0.0
+    stance_slip = (
+        float(np.exp(-20.0 * state.foot_slip[stance] ** 2))
+        if state.contact[stance]
+        else 0.0
+    )
     return {
-        "vel_track": float(np.exp(-4.0 * vx_err * vx_err - 6.0 * vy_err * vy_err)),
+        "vel_track": vel_track,
         "foot_clearance": float(np.exp(-clearance_error * clearance_error)),
         "contact_alt": 1.0 if contacts == 1 else (0.3 if contacts == 2 else 0.0),
+        "swing_contact": swing_contact,
+        "stance_slip": stance_slip,
     }
 
 

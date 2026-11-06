@@ -146,7 +146,12 @@ def test_registry_missing_checkpoint_mentions_training(tmp_path, monkeypatch):
     registry_file = tmp_path / "registry.json"
     registry_file.write_text(
         json.dumps(
-            {"stand": {"stage": "stand", "checkpoint": "checkpoints/stand/policy.pt"}}
+            {
+                "stand": {
+                    "stage": "stand",
+                    "checkpoint": "checkpoints/_definitely_missing_/policy.pt",
+                }
+            }
         ),
         encoding="utf-8",
     )

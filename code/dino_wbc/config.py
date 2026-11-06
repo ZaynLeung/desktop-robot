@@ -168,12 +168,27 @@ CURRICULUM_TURN_DOWN = 0.01
 
 #: 抬脚高度范围（m）；课程从下界往上推。
 LIFT_H_RANGE: tuple[float, float] = (0.010, 0.040)
-#: 行走速度范围（m/s）。没有腰 yaw，yaw 指令恒为 0，只做前后 + 侧向。
+#: 行走速度范围（m/s）：前后（vx 正=前进、负=倒车）+ 左右（vy 正=左、负=右）。
 WALK_VX_RANGE: tuple[float, float] = (-0.10, 0.12)
 WALK_VY_RANGE: tuple[float, float] = (-0.06, 0.06)
 
 #: 步态时钟频率（Hz），只用于 walk 阶段的观测相位。
 GAIT_FREQ_HZ = 1.25
+
+# ---- walk v2 训练参数 ------------------------------------------------------
+# 旧版 vel_track 用 exp(-4 e²)：1/e 误差 ~0.5 m/s，而指令只有 0.12 m/s，
+# 奖励几乎饱和（命令 0.12、实际 0 也能拿 0.94），策略没有动力精确跟踪/刹车。
+# 改成"速度误差 σ"形式，σ 与指令范围同量级。
+WALK_VEL_SIGMA: tuple[float, float] = (0.05, 0.04)  # (vx, vy) 的 1/e 误差
+#: 训练时每 1–3 s 换一次速度指令（含停车），让策略学会加速/减速/倒车/侧移切换。
+WALK_COMMAND_HOLD_RANGE: tuple[int, int] = (50, 150)  # 控制步（20 ms/步）
+#: 换指令时有多大概率直接给 (0, 0)，专门训练"停住"。
+WALK_STOP_PROB = 0.20
+#: 摆动脚触地惩罚的阈值（foot_z 低于它算没抬起来）。
+WALK_SWING_CONTACT_Z = 0.005
+#: walk 课程"成功"的平均 vel_track 阈值。新核对 5 cm/s 误差就掉到 0.37，
+#: 所以 0.85 意味着平均跟踪误差约 2 cm/s；旧阈值 0.60 会让"站着不动"也过关。
+WALK_SUCCESS_VEL_TRACK = 0.85
 
 # ----------------------------------------------------------------------
 # 时间尺度
@@ -366,12 +381,19 @@ STAGES: dict[str, StageConfig] = {
         reset_mode="stand",
         gait=True,
         reward={
-            "vel_track": 2.0,
+            # 速度跟踪（新核，见 WALK_VEL_SIGMA）
+            "vel_track": 3.0,
             "upright": 0.6,
             "height": 0.6,
-            "foot_clearance": 0.3,
+            # 抬脚/步态：抬高权重，惩罚拖脚和摆动脚触地
+            "foot_clearance": 1.0,
             "contact_alt": 0.3,
-            "heading": 0.3,
+            "swing_contact": -0.5,
+            "stance_slip": 0.3,
+            "foot_slip": 0.2,
+            # 朝向/平滑/安全
+            "heading": 0.5,
+            "yaw_rate": 0.1,
             "action_mag": 0.02,
             "action_rate": 0.002,
             "fall": -5.0,

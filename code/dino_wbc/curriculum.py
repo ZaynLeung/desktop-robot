@@ -58,8 +58,27 @@ class Curriculum:
         return -1.0 if self.rng.random() < 0.5 else 1.0
 
     def sample_velocity(self) -> tuple[float, float]:
-        vx = float(self.rng.uniform(-self.vx_max, self.vx_max))
+        """walk 速度指令：显式覆盖停车 / 纯侧向 / 纯前后（含倒车）/ 混合。
+
+        旧版独立均匀采样会让“纯侧向”“纯倒车”“停车”各自占比很低；
+        这里按模式采样，保证每个方向都能被学到。vx 用**非对称**范围
+        ``[-0.10, +0.12]`` 按课程比例缩放（不能简单取 ±max，否则倒车会超界）。
+        """
+        if self.rng.random() < config.WALK_STOP_PROB:
+            return 0.0, 0.0
+        max_abs_vx = max(abs(v) for v in config.WALK_VX_RANGE)
+        scale = float(np.clip(self.vx_max / max_abs_vx, 0.0, 1.0))
+        vx = float(
+            self.rng.uniform(
+                config.WALK_VX_RANGE[0] * scale, config.WALK_VX_RANGE[1] * scale
+            )
+        )
         vy = float(self.rng.uniform(-self.vy_max, self.vy_max))
+        mode = float(self.rng.random())
+        if mode < 0.25:  # 纯侧向（左右）
+            return 0.0, vy
+        if mode < 0.55:  # 纯前后（正=前进、负=倒车）
+            return vx, 0.0
         return vx, vy
 
     def sample_standup_pose(self) -> config.StandupPose:

@@ -12,9 +12,10 @@
 
 按键（需要窗口）::
 
-    1-5        切换阶段 stand / lift / standup / walk / turn（重新加载控制器并复位）
-    W / S      vx ±0.02（行走）
-    A / D      vy ±0.02（行走）
+    1-5        热切换阶段 stand / lift / standup / walk / turn（默认不复位；standup 例外）
+    W / S      vx ±0.02（walk；负=倒车）
+    A / D      vy ±0.02（walk；正=左、负=右）
+    X          walk 停车（vx=vy=0）
     L / R      抬脚目标脚：左脚 / 右脚
     U          命令切成 standup
     Z / C      turn 阶段的绝对朝向指令 ∓5°
@@ -158,8 +159,14 @@ class Runner:
         mujoco.mj_forward(self.model, self.data)
 
         self.contract = model_io.contract_hash(self.model, self.layout)
+        # 只给 --checkpoint 时默认用它加载；否则按 --controller（名字/路径）。
+        controller_ref = (
+            args.checkpoint
+            if (args.checkpoint and args.controller == "scripted_stand")
+            else args.controller
+        )
         self.controller = load_controller(
-            args.controller,
+            controller_ref,
             expected_contract=self.contract,
             checkpoint=args.checkpoint,
         )
@@ -453,6 +460,14 @@ class Runner:
         elif key in (ord("u"), ord("U")):
             # 只把命令切到 standup；控制器本身不动（standup 阶段仍需按 3 换控制器）。
             self.command = make_command("standup")
+        elif key in (ord("x"), ord("X")):
+            # X：walk 停车（vx=vy=0），不重置环境
+            if self.controller.stage != "walk":
+                print("[提示] X 停车只在 walk 阶段生效（先按 4 切到 walk）。")
+                return
+            command[config.CMD_VX] = 0.0
+            command[config.CMD_VY] = 0.0
+            print("停车：vx=0, vy=0")
         elif key in (ord("z"), ord("Z"), ord("c"), ord("C")):
             # Z/C：turn 阶段的绝对朝向指令 ∓5°
             if self.controller.stage != "turn":
@@ -488,7 +503,7 @@ class Runner:
         print(f"轻推：{force:.1f} N × {steps} 步（0.1 s）")
 
     def _switch_task(self, stage: str) -> None:
-        """1-5 键：重新加载该阶段控制器并复位。"""
+        """1-5 键：热切换控制器；默认**不重置**机器人（standup 例外）。"""
         if stage == self.controller.stage:
             return
         new_controller = None
@@ -512,8 +527,35 @@ class Runner:
         self.controller = new_controller
         if old is not new_controller:
             old.close()
-        self._reset_episode()
-        print(f"已切换控制器：{self.controller.name}（stage={self.controller.stage}）")
+        if stage == "standup":
+            # standup 的任务定义就是从躺倒姿态起身；保持站立姿态没有意义，仍然复位。
+            self._reset_episode()
+            print(
+                f"已切换控制器：{self.controller.name}"
+                f"（stage={self.controller.stage}，standup 需要躺倒起始，已复位）"
+            )
+            return
+        self._hot_swap_controller()
+        print(
+            f"已热切换控制器：{self.controller.name}"
+            f"（stage={self.controller.stage}，环境未复位）"
+        )
+
+    def _hot_swap_controller(self) -> None:
+        """保持机器人位姿/速度/仿真时间，只换策略、命令和参考目标。"""
+        self._last_state = read_state(self.model, self.data, self.layout)
+        # 新控制器保持"当前位置"作为位置目标（stand/lift/turn），避免它试图走回旧复位点。
+        self._target_xy = np.asarray(
+            self._last_state.base_pos[:2], dtype=np.float64
+        ).copy()
+        self.obs_builder.target_xy = self._target_xy.copy()
+        # 新策略的步态时钟从 0 开始；上一步动作保留（对连续控制更自然）。
+        self.obs_builder.phase = 0.0
+        self.data.xfrc_applied[:] = 0.0
+        self._manual_push_steps = 0
+        self.controller.reset()
+        self.command = self._new_command(self.controller.stage)
+        self._sync_target_foot()
 
     def _reset_episode(self) -> None:
         """按当前阶段复位：standup 摆到课程起始姿态，其余回到站姿。"""

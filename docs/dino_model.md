@@ -128,11 +128,12 @@ torso（浮动基座，freejoint: root）
 | `stand_knee` | −0.10 | 轻微屈膝 |
 | `stand_ankle` | **自动** | `−(base_pitch + stand_hip + stand_knee)`，保证足底水平 |
 | `stand_tail1_yaw` / `stand_tail3_yaw` | 0 / 0 | 尾巴在矢状面内 |
-| `stand_tail2_pitch` / `stand_tail4_pitch` | 0.18 / 0.14 | 尾巴向后下方垂：20° → 30° → 38° |
+| `stand_tail2_pitch` / `stand_tail4_pitch` | −0.10 / −0.05 | 尾巴略微上扬、**离地约 4.3 cm**（不再作为支撑点） |
 | 基座高度 | 0.1841 m | 由 `solve_base_z()` 用足 + 前趾 24 个顶点反解，最低点贴地 |
 
-尾巴第 1 节现在是 yaw 关节，所以站姿下它只跟着躯干的 20° 抬头，不再单独下垂；
-下垂量分给了 ⑯ / ⑱ 两个 pitch 关节（0.18 / 0.14 rad），末端总角度和上一版接近。
+尾巴第 1 节现在是 yaw 关节，所以站姿下它只跟着躯干的 20° 抬头，不再单独下垂。
+v2.2 起尾巴 pitch 改成 −0.10 / −0.05（原来是 0.18 / 0.14）：尾巴最低点从触地（约 4.7 N）
+抬到离地约 4.3 cm，**站立只靠双脚**；WBC 训练里 stand/lift/turn 阶段尾巴触地会直接终止。
 
 ## 7. 头部相机
 

@@ -233,9 +233,10 @@ class DinoSpec:
     stand_hip_yaw: float = 0.0
     stand_knee: float = -0.10
     stand_tail1_yaw: float = 0.0
-    stand_tail2_pitch: float = 0.18
+    # v2.2：尾巴抬高、不再触地（实测最低点离地约 4.3 cm），尾巴不能作为支撑点。
+    stand_tail2_pitch: float = -0.10
     stand_tail3_yaw: float = 0.0
-    stand_tail4_pitch: float = 0.14
+    stand_tail4_pitch: float = -0.05
 
     density: float = 400.0
 

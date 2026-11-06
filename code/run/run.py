@@ -12,11 +12,12 @@
 
 按键（需要窗口）::
 
-    1-4        切换阶段 stand / lift / standup / walk（重新加载控制器并复位）
+    1-5        切换阶段 stand / lift / standup / walk / turn（重新加载控制器并复位）
     W / S      vx ±0.02（行走）
     A / D      vy ±0.02（行走）
     L / R      抬脚目标脚：左脚 / 右脚
     U          命令切成 standup
+    Z / C      turn 阶段的绝对朝向指令 ∓5°
     P          手动推一下（5 N × 0.1 s）
     Space      复位到当前阶段起始姿态并重置控制器
     V          standup 阶段切换起始姿态：crouch / side / supine 循环
@@ -66,6 +67,7 @@ TASK_KEYS = {
     ord("2"): "lift",
     ord("3"): "standup",
     ord("4"): "walk",
+    ord("5"): "turn",
 }
 #: 还没有 checkpoint 的阶段退回到脚本控制器（保证演示可用）。
 SCRIPTED_FALLBACK = {"stand": "scripted_stand", "lift": "scripted_lift"}
@@ -137,6 +139,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.025,
         help="lift 阶段的抬脚高度指令（m），会夹在 LIFT_H_RANGE 内",
     )
+    parser.add_argument(
+        "--yaw",
+        type=float,
+        default=0.0,
+        help="turn 阶段的绝对朝向指令（度）；stand 固定为 0",
+    )
     return parser
 
 
@@ -196,7 +204,9 @@ class Runner:
     # 初始化辅助
     # ------------------------------------------------------------------
     def _new_command(self, stage: str) -> np.ndarray:
-        """按阶段构造命令，并给 lift 一个训练范围内的默认值。"""
+        """按阶段构造命令：lift 给抬脚高度，turn 给绝对朝向，stand 朝向固定 0。"""
+        if stage == "turn":
+            return make_command("turn", yaw=float(np.radians(self.args.yaw)))
         command = make_command(stage)
         if stage == "lift":
             low, high = config.LIFT_H_RANGE
@@ -354,25 +364,37 @@ class Runner:
     def _hud_lines(self) -> list[str]:
         state = self._last_state
         command = self.command
-        task = config.TASK_NAMES[int(np.argmax(command[0:4]))]
+        task = config.TASK_NAMES[int(np.argmax(command[0:5]))]
         controller_line = (
             f"controller {self.controller.name}  stage {self.controller.stage}"
         )
         pose = self._current_standup_pose()
         if pose is not None:
             controller_line += f"  pose {pose.name}"
+        yaw_error_deg = float(
+            np.degrees(
+                np.arctan2(
+                    np.sin(float(command[config.CMD_YAW]) - state.yaw_rad),
+                    np.cos(float(command[config.CMD_YAW]) - state.yaw_rad),
+                )
+            )
+        )
+        position_error = float(
+            np.linalg.norm(np.asarray(state.base_pos[:2]) - self._target_xy)
+        )
         return [
             controller_line,
             (
                 f"cmd {task} vx={command[config.CMD_VX]:+.2f} "
                 f"vy={command[config.CMD_VY]:+.2f} "
                 f"lift_h={command[config.CMD_LIFT_H]:.3f} "
-                f"foot={command[config.CMD_TARGET_FOOT]:+.0f}"
+                f"foot={command[config.CMD_TARGET_FOOT]:+.0f} "
+                f"yaw={np.degrees(command[config.CMD_YAW]):+.0f}deg"
             ),
             (
                 f"base_z {state.base_pos[2]:.3f}m  "
                 f"tilt {state.tilt_deg:5.1f}deg  "
-                f"contact {int(state.contact[0])}{int(state.contact[1])}"
+                f"yaw_err {yaw_error_deg:+6.1f}deg  pos_err {position_error*100:4.1f}cm"
             ),
             (
                 f"foot_z L{state.foot_z[0]:.3f} R{state.foot_z[1]:.3f}  "
@@ -431,6 +453,16 @@ class Runner:
         elif key in (ord("u"), ord("U")):
             # 只把命令切到 standup；控制器本身不动（standup 阶段仍需按 3 换控制器）。
             self.command = make_command("standup")
+        elif key in (ord("z"), ord("Z"), ord("c"), ord("C")):
+            # Z/C：turn 阶段的绝对朝向指令 ∓5°
+            if self.controller.stage != "turn":
+                print("[提示] Z/C 调朝向只在 turn 阶段生效（先按 5 切到 turn）。")
+                return
+            delta = -5.0 if key in (ord("z"), ord("Z")) else 5.0
+            yaw_deg = float(np.degrees(self.command[config.CMD_YAW])) + delta
+            self.command[config.CMD_YAW] = float(
+                np.radians((yaw_deg + 180.0) % 360.0 - 180.0)
+            )
         elif key in (ord("v"), ord("V")):
             # V：standup 阶段在 crouch / side / supine 之间循环，切完立即复位。
             if self.controller.stage != "standup":
@@ -456,7 +488,7 @@ class Runner:
         print(f"轻推：{force:.1f} N × {steps} 步（0.1 s）")
 
     def _switch_task(self, stage: str) -> None:
-        """1-4 键：重新加载该阶段控制器并复位。"""
+        """1-5 键：重新加载该阶段控制器并复位。"""
         if stage == self.controller.stage:
             return
         new_controller = None
@@ -495,9 +527,13 @@ class Runner:
         else:
             reset_to_stand(self.model, self.data, self.layout)
             mujoco.mj_forward(self.model, self.data)
-        self.obs_builder.reset()
-        self.controller.reset()
         self._last_state = read_state(self.model, self.data, self.layout)
+        # 位置保持目标 = 复位后的基座 xy（与训练 reset 一致）。
+        self._target_xy = np.asarray(
+            self._last_state.base_pos[:2], dtype=np.float64
+        ).copy()
+        self.obs_builder.reset(self._target_xy)
+        self.controller.reset()
         self.follow_cam.initialized = False
         self.command = self._new_command(self.controller.stage)
         self._sync_target_foot()

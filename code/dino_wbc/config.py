@@ -4,7 +4,7 @@
 
 * 关节顺序（必须与 ``models/dino.xml`` 的深度优先遍历一致）
 * 动作尺度、观测缩放/裁剪
-* 阶段（stand / lift / standup / walk）的 episode 长度、reset 方式、奖励权重
+* 阶段（stand / lift / standup / walk / turn）的 episode 长度、reset 方式、奖励权重
 * 终止/成功判据、课程范围、reset 噪声
 
 改这里之前先看 ``code/README.md`` 的「调参入口」一节；模型尺寸改了要重新
@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 
 # ----------------------------------------------------------------------
 # 关节：顺序 = body 深度优先遍历 + body 内关节定义顺序
@@ -91,16 +92,16 @@ ACTION_SCALE: tuple[float, ...] = tuple(
 )
 
 # ----------------------------------------------------------------------
-# 观测：80 维，固定解析缩放（不用 VecNormalize，保证脱离训练栈也能运行）
+# 观测：85 维，固定解析缩放（不用 VecNormalize，保证脱离训练栈也能运行）
 # ----------------------------------------------------------------------
-OBS_DIM: int = 80
+OBS_DIM: int = 85
 
 # 各块维度（顺序与 observation.build_obs 完全一致）
-OBS_BASE_DIM = 10  # z 误差 / 投影重力(3) / 本体系线速度(3) / 本体系角速度(3)
+OBS_BASE_DIM = 13  # z 误差 / 重力(3) / 线速度(3) / 角速度(3) / 朝向误差 / 位置误差 xy
 OBS_JOINT_DIM = 2 * NUM_JOINTS  # q(18) + qd(18)
 OBS_FOOT_DIM = 6  # 足高(2) / 接触(2) / 滑移(2)
 OBS_ACTION_DIM = NUM_JOINTS  # 上一步动作
-OBS_COMMAND_DIM = 8  # 任务 one-hot(4) + vx + vy + 抬脚高度 + 目标脚
+OBS_COMMAND_DIM = 10  # 任务 one-hot(5) + vx + vy + 抬脚高度 + 目标脚 + 朝向指令
 OBS_PHASE_DIM = 2  # sin/cos 步态时钟
 
 assert (
@@ -122,6 +123,11 @@ FOOT_Z_SCALE = 10.0
 FOOT_SLIP_SCALE = 10.0
 CMD_VEL_SCALE = 10.0
 LIFT_H_SCALE = 25.0
+#: 绝对朝向误差/指令：除以 π 归一到 [-1, 1]。
+HEADING_SCALE = 1.0 / math.pi
+#: 位置误差（m）：放大 10 倍并裁剪到 ±1（对应 ±0.1 m）。
+POSITION_SCALE = 10.0
+POSITION_CLIP = 1.0
 
 #: 观测裁剪（防止异常状态把策略推离训练分布）。
 BASE_LIN_VEL_CLIP = 2.0
@@ -134,19 +140,31 @@ FOOT_Z_OFFSET = 0.02  # 足底静止时足 body 原点离地约 16 mm
 # ----------------------------------------------------------------------
 # 指令向量
 # ----------------------------------------------------------------------
-#: 任务名 → one-hot 下标（顺序即 command[0:4]）。
-TASK_NAMES: tuple[str, ...] = ("stand", "lift", "standup", "walk")
+#: 任务名 → one-hot 下标（顺序即 command[0:5]）。
+TASK_NAMES: tuple[str, ...] = ("stand", "lift", "standup", "walk", "turn")
 TASK_TO_INDEX: dict[str, int] = {name: i for i, name in enumerate(TASK_NAMES)}
 
 CMD_STAND = 0
 CMD_LIFT = 1
 CMD_STANDUP = 2
 CMD_WALK = 3
-CMD_VX = 4
-CMD_VY = 5
-CMD_LIFT_H = 6
-CMD_TARGET_FOOT = 7
+CMD_TURN = 4
+CMD_VX = 5
+CMD_VY = 6
+CMD_LIFT_H = 7
+CMD_TARGET_FOOT = 8
+CMD_YAW = 9
 COMMAND_DIM = OBS_COMMAND_DIM
+
+#: 绝对朝向指令范围（rad）：stand 固定 0，turn 课程从下界推到上界。
+TURN_YAW_RANGE: tuple[float, float] = (0.30, math.pi)
+#: turn 阶段判定"跟住朝向"的门限与保持步数。
+TURN_HOLD_HEADING_DEG = 10.0
+TURN_HOLD_POSITION = 0.05  # m
+TURN_HOLD_STEPS = 25  # 0.5 s
+#: turn 课程晋级/退档步长。
+CURRICULUM_TURN_UP = 0.03
+CURRICULUM_TURN_DOWN = 0.01
 
 #: 抬脚高度范围（m）；课程从下界往上推。
 LIFT_H_RANGE: tuple[float, float] = (0.010, 0.040)
@@ -187,6 +205,17 @@ LIFT_STANCE_Z_DELTA = 0.03  # 抬脚奖励/课程要求的姿态门限：z > z_s
 LIFT_STANCE_TILT_DEG = 25.0
 LIFT_HOLD_STEPS = 25  # 连续保持 0.5 s 才算"抬脚成功"（不是累计）
 LIFT_HEIGHT_RATIO = 0.8  # 达到指令高度的 80% 即算达标步
+
+# ---- 静态站立的绝对朝向 / 位置保持 ------------------------------------------
+# 用户的 stand 策略实测 400 步朝向漂了 95–137°，因为观测/奖励里没有绝对朝向。
+# 下面这组门限让"偏太多"的 rollout 提前终止，配合 heading/position 奖励项。
+STAND_MAX_HEADING_ERROR_DEG = 30.0
+STAND_MAX_POSITION_ERROR = 0.10  # m
+LIFT_MAX_HEADING_ERROR_DEG = 30.0
+LIFT_MAX_POSITION_ERROR = 0.15
+TURN_MAX_POSITION_ERROR = 0.12
+#: 朝向/位置违规需要连续多少步才终止（避免瞬时尖峰误杀）。
+POSITION_GRACE_STEPS = 5
 
 # ----------------------------------------------------------------------
 # 外力轻推（stand 阶段的扰动课程）
@@ -233,6 +262,12 @@ class StageConfig:
     fall_tilt_deg: float | None = None
     #: 躯干/头/臂/腿（不含尾巴）接触地板时是否终止。
     terminate_on_body_contact: bool = False
+    #: 尾巴接触地板时是否终止（stand/lift/turn 为 True：尾巴不能当支撑点）。
+    terminate_on_tail_contact: bool = False
+    #: 绝对朝向误差/位置误差超过门限连续 ``heading_grace_steps`` 步就终止。
+    max_heading_error_deg: float | None = None
+    max_position_error_m: float | None = None
+    heading_grace_steps: int = POSITION_GRACE_STEPS
     #: 外力轻推课程；None = 不施加。
     push: PushConfig | None = None
 
@@ -249,6 +284,9 @@ STAGES: dict[str, StageConfig] = {
         fall_z_delta=STAND_FALL_Z_DELTA,
         fall_tilt_deg=STAND_FALL_TILT_DEG,
         terminate_on_body_contact=True,
+        terminate_on_tail_contact=True,
+        max_heading_error_deg=STAND_MAX_HEADING_ERROR_DEG,
+        max_position_error_m=STAND_MAX_POSITION_ERROR,
         push=PushConfig(
             enabled=True,
             max_force=5.0,
@@ -259,6 +297,8 @@ STAGES: dict[str, StageConfig] = {
             "alive": 0.3,
             "height": 1.5,
             "upright": 1.5,
+            "heading": 2.0,
+            "position": 1.5,
             "base_vel": 0.5,
             "yaw_rate": 0.2,
             "foot_contact": 0.3,
@@ -279,10 +319,15 @@ STAGES: dict[str, StageConfig] = {
         fall_z_delta=LIFT_FALL_Z_DELTA,
         fall_tilt_deg=LIFT_FALL_TILT_DEG,
         terminate_on_body_contact=True,
+        terminate_on_tail_contact=True,
+        max_heading_error_deg=LIFT_MAX_HEADING_ERROR_DEG,
+        max_position_error_m=LIFT_MAX_POSITION_ERROR,
         reward={
             "alive": 0.2,
             "height": 1.0,
             "upright": 1.0,
+            "heading": 0.5,
+            "position": 0.5,
             "base_vel": 0.5,
             "yaw_rate": 0.1,
             "foot_slip": 0.3,
@@ -329,6 +374,33 @@ STAGES: dict[str, StageConfig] = {
             "heading": 0.3,
             "action_mag": 0.02,
             "action_rate": 0.002,
+            "fall": -5.0,
+        },
+    ),
+    "turn": StageConfig(
+        name="turn",
+        episode_steps=500,
+        reset_mode="stand",
+        fall_z_delta=STAND_FALL_Z_DELTA,
+        fall_tilt_deg=STAND_FALL_TILT_DEG,
+        terminate_on_body_contact=True,
+        terminate_on_tail_contact=True,
+        # 不按朝向误差终止：转不到目标正是要学的；只限制别走位/别摔。
+        max_position_error_m=TURN_MAX_POSITION_ERROR,
+        reward={
+            "alive": 0.3,
+            "height": 1.5,
+            "upright": 1.5,
+            "heading": 3.0,
+            "position": 1.0,
+            "base_vel": 0.5,
+            "yaw_rate": 0.1,
+            "action_mag": 0.02,
+            "action_rate": 0.001,
+            "joint_posture": -0.05,
+            "low_posture": -2.0,
+            "body_contact": -5.0,
+            "tail_contact": -0.2,
             "fall": -5.0,
         },
     ),
@@ -413,6 +485,9 @@ CURRICULUM: dict[str, dict[str, CurriculumRange]] = {
     "walk": {
         "vx": CurriculumRange(0.03, max(abs(v) for v in WALK_VX_RANGE)),
         "vy": CurriculumRange(0.015, max(abs(v) for v in WALK_VY_RANGE)),
+    },
+    "turn": {
+        "yaw": CurriculumRange(TURN_YAW_RANGE[0], TURN_YAW_RANGE[1]),
     },
 }
 CURRICULUM_WINDOW = 20

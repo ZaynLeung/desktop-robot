@@ -26,6 +26,7 @@ class CurriculumState:
     max_vx: float
     max_vy: float
     push_force: float = 0.0
+    max_yaw: float = 0.0
 
 
 class Curriculum:
@@ -40,6 +41,7 @@ class Curriculum:
         self.lift_h_max = config.LIFT_H_RANGE[0]
         self.vx_max = config.WALK_VX_RANGE[0]
         self.vy_max = config.WALK_VY_RANGE[0]
+        self.yaw_max = config.TURN_YAW_RANGE[0]
         push = config.STAGES[stage].push
         self.push_force = 0.0
         self.push_max = float(push.max_force) if push is not None else 0.0
@@ -63,6 +65,10 @@ class Curriculum:
     def sample_standup_pose(self) -> config.StandupPose:
         return config.STANDUP_POSES[self.pose_index]
 
+    def sample_yaw(self) -> float:
+        """turn 阶段采样一个绝对朝向指令（rad）。"""
+        return float(self.rng.uniform(-self.yaw_max, self.yaw_max))
+
     def sample_push_force(self) -> float:
         """当前推力课程下的一次推力模长（N）；未启用或还未爬坡时返回 0。"""
         if self.push_max <= 0.0 or self.push_force <= 0.0:
@@ -85,11 +91,17 @@ class Curriculum:
                 np.clip(self.push_force + step, 0.0, self.push_max)
             )
         elif self.stage in config.CURRICULUM:
-            step = (
-                config.CURRICULUM_LIFT_UP
-                if success
-                else -config.CURRICULUM_LIFT_DOWN
+            up = (
+                config.CURRICULUM_TURN_UP
+                if self.stage == "turn"
+                else config.CURRICULUM_LIFT_UP
             )
+            down = (
+                config.CURRICULUM_TURN_DOWN
+                if self.stage == "turn"
+                else config.CURRICULUM_LIFT_DOWN
+            )
+            step = up if success else -down
             self.level = float(np.clip(self.level + step, 0.0, 1.0))
             self._apply_level()
 
@@ -101,6 +113,9 @@ class Curriculum:
             cfg = config.CURRICULUM["walk"]
             self.vx_max = cfg["vx"].start + (cfg["vx"].end - cfg["vx"].start) * self.level
             self.vy_max = cfg["vy"].start + (cfg["vy"].end - cfg["vy"].start) * self.level
+        elif self.stage == "turn":
+            cfg = config.CURRICULUM["turn"]["yaw"]
+            self.yaw_max = cfg.start + (cfg.end - cfg.start) * self.level
 
     def _advance_standup(self) -> None:
         if len(self.window) < self.window.maxlen:
@@ -131,4 +146,5 @@ class Curriculum:
             max_vx=self.vx_max,
             max_vy=self.vy_max,
             push_force=self.push_force,
+            max_yaw=self.yaw_max,
         )

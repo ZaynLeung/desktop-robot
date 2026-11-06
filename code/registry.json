@@ -1,12 +1,12 @@
 {
   "stand": {
     "stage": "stand",
-    "checkpoint": "checkpoints/stand/policy.pt"
+    "checkpoint": "checkpoints/stand_20261106_155705/policy.pt",
+    "contract_hash": "ff4896b556357e18"
   },
   "lift": {
     "stage": "lift",
-    "checkpoint": "checkpoints/lift_20261106_003426/policy.pt",
-    "contract_hash": "516595fa06087be5"
+    "checkpoint": "checkpoints/lift/policy.pt"
   },
   "standup": {
     "stage": "standup",
@@ -15,5 +15,9 @@
   "walk": {
     "stage": "walk",
     "checkpoint": "checkpoints/walk/policy.pt"
+  },
+  "turn": {
+    "stage": "turn",
+    "checkpoint": "checkpoints/turn/policy.pt"
   }
 }

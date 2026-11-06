@@ -8,7 +8,9 @@
 * 高度容差从 3 cm 收紧到 2 cm，新增 ``low_posture`` 惩罚，堵住"蹲着/趴着"的局部最优；
 * 抬脚项只在 **stance gate** 成立时给（站在站姿高度附近、不歪、躯干不着地），
   并新增稠密线性项 ``lift_frac`` 与 ``target_ground`` 惩罚，解决 4 cm 时梯度消失；
-* 躯干/头/臂/腿接触地板会终止（``body_contact``），尾巴接触允许但轻微惩罚。
+* 躯干/头/臂/腿接触地板会终止（``body_contact``）；v2.2 起尾巴触地也会终止；
+* v2.2 新增 ``heading``（绝对朝向）与 ``position``（绝对位置）奖励，
+  让 stand 变成"原地 + 对朝向"的静态基座模型。
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import numpy as np
 
 from . import config
 from .model_io import JointLayout
-from .state import RobotState
+from .state import RobotState, wrap_to_pi
 
 #: 势函数折扣（与 PPO 的 gamma 保持一致）。
 POTENTIAL_GAMMA = 0.99
@@ -26,6 +28,10 @@ POTENTIAL_GAMMA = 0.99
 HEIGHT_SIGMA = 0.02
 #: 姿态奖励的容差（rad）：相对站姿倾角 0.2 rad（约 11.5°）时衰减到 1/e。
 UPRIGHT_SIGMA = 0.2
+#: 绝对朝向误差的容差（rad）：0.15 rad ≈ 8.6°。
+HEADING_SIGMA = 0.15
+#: 位置误差的容差（m）。
+POSITION_SIGMA = 0.03
 #: 抬脚高度的容差（m）。
 LIFT_SIGMA = 0.015
 #: 步态摆动足的期望离地高度容差（m）。
@@ -68,6 +74,7 @@ def lift_stance_ok(state: RobotState, layout: JointLayout) -> bool:
     """
     return bool(
         (not state.body_contact)
+        and (not state.tail_contact)
         and state.base_pos[2] > layout.stand_base_z - config.LIFT_STANCE_Z_DELTA
         and state.tilt_deg < config.LIFT_STANCE_TILT_DEG
     )
@@ -89,9 +96,13 @@ def _common_terms(
     action: np.ndarray,
     prev_action: np.ndarray,
     layout: JointLayout,
+    command: np.ndarray,
+    target_xy: np.ndarray,
 ) -> dict[str, float]:
     height_error = (state.base_pos[2] - layout.stand_base_z) / HEIGHT_SIGMA
     tilt_error = state.tilt_rad / UPRIGHT_SIGMA
+    heading_error = wrap_to_pi(float(command[config.CMD_YAW]) - state.yaw_rad)
+    position_error = np.asarray(state.base_pos[:2]) - np.asarray(target_xy)
     low_posture = max(
         0.0,
         (layout.stand_base_z - config.LIFT_STANCE_Z_DELTA - state.base_pos[2])
@@ -101,6 +112,10 @@ def _common_terms(
         "alive": 1.0,
         "height": float(np.exp(-height_error * height_error)),
         "upright": float(np.exp(-tilt_error * tilt_error)),
+        "heading": float(np.exp(-((heading_error / HEADING_SIGMA) ** 2))),
+        "position": float(
+            np.exp(-float(np.dot(position_error, position_error)) / POSITION_SIGMA**2)
+        ),
         "base_vel": float(np.sum(np.square(state.base_lin_vel_b[:2]))),
         "yaw_rate": float(state.base_ang_vel_b[2] ** 2),
         "foot_contact": 1.0 if bool(state.contact.all()) else 0.0,
@@ -160,7 +175,6 @@ def _walk_terms(state: RobotState, command: np.ndarray, phase: float) -> dict[st
         "vel_track": float(np.exp(-4.0 * vx_err * vx_err - 6.0 * vy_err * vy_err)),
         "foot_clearance": float(np.exp(-clearance_error * clearance_error)),
         "contact_alt": 1.0 if contacts == 1 else (0.3 if contacts == 2 else 0.0),
-        "heading": float(np.exp(-2.0 * state.base_ang_vel_b[2] ** 2)),
     }
 
 
@@ -180,13 +194,16 @@ def compute_reward(
     phi_prev: float | None = None,
     success: bool = False,
     fallen: bool = False,
+    target_xy: np.ndarray | None = None,
 ) -> tuple[float, dict[str, float]]:
     """计算一步奖励并返回未加权分项。"""
     stage_cfg = config.STAGES.get(stage)
     if stage_cfg is None:
         raise ValueError(f"未知阶段 {stage!r}，可选 {tuple(config.STAGES)}")
     weights = stage_cfg.reward
-    terms = _common_terms(state, action, prev_action, layout)
+    if target_xy is None:
+        target_xy = np.zeros(2, dtype=np.float64)
+    terms = _common_terms(state, action, prev_action, layout, command, target_xy)
 
     if stage == "lift":
         gate = (not fallen) and lift_stance_ok(state, layout)

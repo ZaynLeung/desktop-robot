@@ -32,6 +32,7 @@ from .state import (
     read_state,
     reset_to_stand,
     settle,
+    wrap_to_pi,
 )
 
 try:  # pragma: no cover
@@ -95,10 +96,19 @@ class DinoWbcEnv(gym.Env):
         self._lift_best_streak = 0
         self._vel_track_sum = 0.0
         self._height_term_sum = 0.0
+        self._heading_term_sum = 0.0
+        self._position_term_sum = 0.0
+        self._yaw_hold_streak = 0
+        self._yaw_best_streak = 0
         self._episode_success = False
         self._episode_closed = False
         self._fell = False
         self._last_terms: dict[str, float] = {}
+        #: 位置保持目标（复位后的基座 xy，世界系）。
+        self._target_xy = np.zeros(2, dtype=np.float64)
+        #: 朝向/位置持续违规计数（超过 grace 才终止）。
+        self._heading_violation = 0
+        self._position_violation = 0
         # ---- 外力轻推状态 ----
         self._push_remaining = 0
         self._next_push_step = 0
@@ -116,10 +126,12 @@ class DinoWbcEnv(gym.Env):
             self.curriculum.rng = self.rng
 
         self._reset_pose()
-        self._command = self._sample_command()
-        self.obs_builder.reset()
-
         state = read_state(self.model, self.data, self.layout)
+        # 位置目标 = 复位后的基座 xy；朝向目标是命令里的绝对角度（stand 为 0）。
+        self._target_xy = np.asarray(state.base_pos[:2], dtype=np.float64).copy()
+        self._command = self._sample_command()
+        self.obs_builder.reset(self._target_xy)
+
         self._prev_action[:] = 0.0
         self._step_count = 0
         self._success_streak = 0
@@ -129,6 +141,12 @@ class DinoWbcEnv(gym.Env):
         self._lift_best_streak = 0
         self._vel_track_sum = 0.0
         self._height_term_sum = 0.0
+        self._heading_term_sum = 0.0
+        self._position_term_sum = 0.0
+        self._yaw_hold_streak = 0
+        self._yaw_best_streak = 0
+        self._heading_violation = 0
+        self._position_violation = 0
         self._episode_success = False
         self._episode_closed = False
         self._fell = False
@@ -178,7 +196,9 @@ class DinoWbcEnv(gym.Env):
         if self.stage == "walk":
             vx, vy = self.curriculum.sample_velocity()
             return make_command("walk", vx=vx, vy=vy)
-        return make_command(self.stage)
+        if self.stage == "turn":
+            return make_command("turn", yaw=self.curriculum.sample_yaw())
+        return make_command(self.stage, yaw=0.0)
 
     # ------------------------------------------------------------------
     # 外力轻推
@@ -260,11 +280,38 @@ class DinoWbcEnv(gym.Env):
                 if cfg.fall_tilt_deg is not None
                 else config.FALL_TILT_DEG
             )
+            # 绝对朝向/位置偏差：连续违规超过 grace 步才终止（避免瞬时尖峰误杀）。
+            heading_error_deg = abs(
+                np.degrees(
+                    wrap_to_pi(float(self._command[config.CMD_YAW]) - state.yaw_rad)
+                )
+            )
+            position_error = float(
+                np.linalg.norm(np.asarray(state.base_pos[:2]) - self._target_xy)
+            )
+            if (
+                cfg.max_heading_error_deg is not None
+                and heading_error_deg > cfg.max_heading_error_deg
+            ):
+                self._heading_violation += 1
+            else:
+                self._heading_violation = 0
+            if (
+                cfg.max_position_error_m is not None
+                and position_error > cfg.max_position_error_m
+            ):
+                self._position_violation += 1
+            else:
+                self._position_violation = 0
+            grace = max(int(cfg.heading_grace_steps), 1)
             fallen = bool(
                 state.base_pos[2] < fall_z
                 or state.tilt_deg > fall_tilt
                 or out_of_bounds(state)
                 or (cfg.terminate_on_body_contact and state.body_contact)
+                or (cfg.terminate_on_tail_contact and state.tail_contact)
+                or self._heading_violation >= grace
+                or self._position_violation >= grace
             )
         self._fell = self._fell or fallen
 
@@ -299,6 +346,7 @@ class DinoWbcEnv(gym.Env):
             phi_prev=self._phi_prev if self.stage == "standup" else None,
             success=success,
             fallen=fallen,
+            target_xy=self._target_xy,
         )
         self._phi_prev = phi
         self._last_terms = terms
@@ -338,6 +386,7 @@ class DinoWbcEnv(gym.Env):
         """
         if fallen:
             self._lift_streak = 0
+            self._yaw_hold_streak = 0
             return
         if self.stage == "lift":
             target = 0 if self._command[config.CMD_TARGET_FOOT] < 0 else 1
@@ -358,6 +407,26 @@ class DinoWbcEnv(gym.Env):
             self._vel_track_sum += terms.get("vel_track", 0.0)
         elif self.stage == "stand":
             self._height_term_sum += terms.get("height", 0.0)
+            self._heading_term_sum += terms.get("heading", 0.0)
+            self._position_term_sum += terms.get("position", 0.0)
+        elif self.stage == "turn":
+            heading_error_deg = abs(
+                np.degrees(
+                    wrap_to_pi(float(self._command[config.CMD_YAW]) - state.yaw_rad)
+                )
+            )
+            position_error = float(
+                np.linalg.norm(np.asarray(state.base_pos[:2]) - self._target_xy)
+            )
+            ok = (
+                heading_error_deg <= config.TURN_HOLD_HEADING_DEG
+                and position_error <= config.TURN_HOLD_POSITION
+            )
+            if ok:
+                self._yaw_hold_streak += 1
+                self._yaw_best_streak = max(self._yaw_best_streak, self._yaw_hold_streak)
+            else:
+                self._yaw_hold_streak = 0
 
     def _episode_outcome(self, success_now: bool) -> bool:
         """把阶段指标折算成课程意义上的"成功"。"""
@@ -372,21 +441,41 @@ class DinoWbcEnv(gym.Env):
                 not self._fell
             ) and self._vel_track_sum / steps > 0.60
         elif self.stage == "stand":
+            meaningfully_standing = (
+                self._height_term_sum / steps > 0.80
+                and self._heading_term_sum / steps > 0.80
+                and self._position_term_sum / steps > 0.80
+            )
+            self._episode_success = (not self._fell) and meaningfully_standing
+        elif self.stage == "turn":
             self._episode_success = (
-                not self._fell
-            ) and self._height_term_sum / steps > 0.80
+                (not self._fell)
+                and self._yaw_best_streak >= config.TURN_HOLD_STEPS
+            )
         else:
             self._episode_success = bool(self._episode_success or success_now)
         return bool(self._episode_success)
 
     def _make_info(self, state, *, success: bool, fallen: bool) -> dict[str, Any]:
         target = 0 if self._command[config.CMD_TARGET_FOOT] < 0 else 1
+        heading_error_deg = float(
+            np.degrees(
+                wrap_to_pi(float(self._command[config.CMD_YAW]) - state.yaw_rad)
+            )
+        )
+        position_error = float(
+            np.linalg.norm(np.asarray(state.base_pos[:2]) - self._target_xy)
+        )
         return {
             "stage": self.stage,
             "success": bool(success),
             "fallen": bool(fallen),
             "base_z": float(state.base_pos[2]),
             "tilt_deg": float(state.tilt_deg),
+            "yaw_deg": float(np.degrees(state.yaw_rad)),
+            "yaw_cmd_deg": float(np.degrees(self._command[config.CMD_YAW])),
+            "heading_error_deg": heading_error_deg,
+            "position_error": position_error,
             "contact": state.contact.copy(),
             "foot_z": state.foot_z.copy(),
             "command": self._command.copy(),
@@ -398,6 +487,8 @@ class DinoWbcEnv(gym.Env):
             "support_contact": bool(state.contact[1 - target]),
             "lift_streak": int(self._lift_streak),
             "lift_best_streak": int(self._lift_best_streak),
+            "yaw_hold_streak": int(self._yaw_hold_streak),
+            "yaw_best_streak": int(self._yaw_best_streak),
             "pushed": bool(self._pushed),
             "push_force": float(self._push_force),
         }

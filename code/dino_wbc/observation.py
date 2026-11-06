@@ -1,11 +1,13 @@
-"""80 维观测的构造（训练端与运行端共用）。
+"""85 维观测的构造（训练端与运行端共用）。
 
 分块顺序（与 :mod:`dino_wbc.config` 的 ``OBS_*_DIM`` 一一对应）::
 
-    base(10) | joints(36) | feet(6) | prev_action(18) | command(8) | phase(2)
+    base(13) | joints(36) | feet(6) | prev_action(18) | command(10) | phase(2)
 
-命令向量内部用**物理单位**保存（m/s、m、±1），只在拼观测时缩放，
-这样奖励函数可以直接拿它当目标值用。
+* base 新增 **绝对朝向误差** 与 **位置误差 xy**（stand 的“原地 + 对朝向”任务需要）；
+* command 新增 **绝对朝向指令**（stand 固定 0，turn 由课程采样）；
+* 命令向量内部用**物理单位**保存（m/s、m、rad、±1），只在拼观测时缩放，
+  这样奖励函数可以直接拿它当目标值用。
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import numpy as np
 
 from . import config
 from .model_io import JointLayout
-from .state import RobotState
+from .state import RobotState, wrap_to_pi
 
 
 def make_command(
@@ -24,8 +26,9 @@ def make_command(
     vy: float = 0.0,
     lift_h: float = 0.0,
     target_foot: float = 0.0,
+    yaw: float = 0.0,
 ) -> np.ndarray:
-    """构造 8 维命令向量（物理单位）。"""
+    """构造 10 维命令向量（物理单位；``yaw`` 是绝对朝向，rad）。"""
     command = np.zeros(config.COMMAND_DIM, dtype=np.float64)
     if task not in config.TASK_TO_INDEX:
         raise ValueError(f"未知任务 {task!r}，可选 {config.TASK_NAMES}")
@@ -34,6 +37,7 @@ def make_command(
     command[config.CMD_VY] = float(vy)
     command[config.CMD_LIFT_H] = float(lift_h)
     command[config.CMD_TARGET_FOOT] = float(target_foot)
+    command[config.CMD_YAW] = wrap_to_pi(yaw)
     return command
 
 
@@ -48,8 +52,12 @@ def build_obs(
     command: np.ndarray,
     phase_sin_cos: tuple[float, float],
     layout: JointLayout,
+    target_xy: np.ndarray | None = None,
 ) -> np.ndarray:
-    """按固定顺序拼出 80 维观测（float32）。"""
+    """按固定顺序拼出 85 维观测（float32）。"""
+    if target_xy is None:
+        target_xy = np.zeros(2, dtype=np.float64)
+
     base = np.empty(config.OBS_BASE_DIM, dtype=np.float64)
     base[0] = (state.base_pos[2] - layout.stand_base_z) * config.BASE_Z_SCALE
     base[1:4] = np.clip(state.gravity_b, -1.0, 1.0)
@@ -58,6 +66,16 @@ def build_obs(
     )
     base[7:10] = np.clip(
         state.base_ang_vel_b, -config.BASE_ANG_VEL_CLIP, config.BASE_ANG_VEL_CLIP
+    )
+    heading_error = wrap_to_pi(float(command[config.CMD_YAW]) - state.yaw_rad)
+    base[10] = heading_error * config.HEADING_SCALE
+    position_error = np.asarray(state.base_pos[:2], dtype=np.float64) - np.asarray(
+        target_xy, dtype=np.float64
+    )
+    base[11:13] = np.clip(
+        position_error * config.POSITION_SCALE,
+        -config.POSITION_CLIP,
+        config.POSITION_CLIP,
     )
 
     joints = np.empty(config.OBS_JOINT_DIM, dtype=np.float64)
@@ -78,11 +96,12 @@ def build_obs(
     )
 
     cmd = np.empty(config.OBS_COMMAND_DIM, dtype=np.float64)
-    cmd[0:4] = command[0:4]
-    cmd[4] = command[config.CMD_VX] * config.CMD_VEL_SCALE
-    cmd[5] = command[config.CMD_VY] * config.CMD_VEL_SCALE
-    cmd[6] = command[config.CMD_LIFT_H] * config.LIFT_H_SCALE
-    cmd[7] = command[config.CMD_TARGET_FOOT]
+    cmd[0:5] = command[0:5]
+    cmd[5] = command[config.CMD_VX] * config.CMD_VEL_SCALE
+    cmd[6] = command[config.CMD_VY] * config.CMD_VEL_SCALE
+    cmd[7] = command[config.CMD_LIFT_H] * config.LIFT_H_SCALE
+    cmd[8] = command[config.CMD_TARGET_FOOT]
+    cmd[9] = command[config.CMD_YAW] * config.HEADING_SCALE
 
     obs = np.concatenate(
         [
@@ -100,16 +119,19 @@ def build_obs(
 
 
 class ObsBuilder:
-    """有状态的观测构造器：保存上一步动作与步态时钟。"""
+    """有状态的观测构造器：保存上一步动作、步态时钟与位置目标。"""
 
     def __init__(self, layout: JointLayout):
         self.layout = layout
         self.prev_action = np.zeros(layout.num_joints, dtype=np.float64)
         self.phase = 0.0
+        self.target_xy = np.zeros(2, dtype=np.float64)
 
-    def reset(self) -> None:
+    def reset(self, target_xy: np.ndarray | None = None) -> None:
         self.prev_action[:] = 0.0
         self.phase = 0.0
+        if target_xy is not None:
+            self.target_xy = np.asarray(target_xy, dtype=np.float64)[:2].copy()
 
     def push_action(self, action: np.ndarray) -> None:
         self.prev_action = np.clip(
@@ -131,4 +153,11 @@ class ObsBuilder:
             phase = (float(np.sin(self.phase)), float(np.cos(self.phase)))
         else:
             phase = (0.0, 0.0)
-        return build_obs(state, self.prev_action, command, phase, self.layout)
+        return build_obs(
+            state,
+            self.prev_action,
+            command,
+            phase,
+            self.layout,
+            target_xy=self.target_xy,
+        )

@@ -173,10 +173,17 @@ def test_evaluate_reports_v2_metrics():
     for key in (
         "success_rate",
         "body_contact_rate",
+        "tail_contact_rate",
         "support_contact_rate",
         "mean_target_foot_z",
         "max_target_foot_z",
         "lift_hold_success_rate",
+        "heading_error_mean_deg",
+        "heading_error_max_deg",
+        "position_error_mean",
+        "position_error_max",
+        "yaw_drift_deg",
+        "yaw_hold_success_rate",
     ):
         assert key in summary, key
         assert np.isfinite(summary[key])

@@ -64,19 +64,58 @@ def test_obs_layout_and_scaling(rig):
     assert obs.dtype == np.float32
     assert np.isfinite(obs).all()
 
-    # base 块
+    # base 块：z 误差 / 重力 / 线速度 / 角速度 / 朝向误差 / 位置误差 xy
     assert obs[0] == pytest.approx(0.0, abs=1e-5)
     expected_gravity = np.array(
         [-np.sin(np.radians(20.0)), 0.0, -np.cos(np.radians(20.0))]
     )
     assert np.allclose(obs[1:4], expected_gravity, atol=0.02)
+    assert obs[10] == pytest.approx(0.0, abs=1e-5)  # 朝向误差（walk 目标 0）
+    assert np.allclose(obs[11:13], 0.0, atol=1e-5)  # 位置误差（目标默认原点）
     # joints 块：站姿全 0
-    assert np.allclose(obs[10:46], 0.0, atol=1e-6)
-    # command 块
-    assert obs[config.OBS_DIM - config.OBS_PHASE_DIM - config.OBS_COMMAND_DIM + 4] == pytest.approx(1.0)
-    assert obs[config.OBS_DIM - config.OBS_PHASE_DIM - config.OBS_COMMAND_DIM + 5] == pytest.approx(-0.5)
+    assert np.allclose(obs[13:49], 0.0, atol=1e-6)
+    # command 块（起点 = 13+36+6+18 = 73）
+    command_start = config.OBS_DIM - config.OBS_PHASE_DIM - config.OBS_COMMAND_DIM
+    assert obs[command_start + 5] == pytest.approx(1.0)  # vx = 0.1 × 10
+    assert obs[command_start + 6] == pytest.approx(-0.5)  # vy = -0.05 × 10
+    assert obs[command_start + 9] == pytest.approx(0.0)  # yaw 指令
     # phase 块非零
     assert not np.allclose(obs[-2:], 0.0)
+
+
+def test_yaw_and_heading_error(rig):
+    """绕 z 转 30° 后 yaw 应为 30°，heading_error 与指令相反。"""
+    model, layout, data = rig
+    theta = np.radians(30.0)
+    data.qpos[3:7] = [np.cos(theta / 2), 0.0, 0.0, np.sin(theta / 2)]
+    mujoco.mj_forward(model, data)
+    state = read_state(model, data, layout)
+    assert np.degrees(state.yaw_rad) == pytest.approx(30.0, abs=1e-6)
+
+    command = make_command("stand", yaw=0.0)
+    start = config.OBS_DIM - config.OBS_PHASE_DIM - config.OBS_COMMAND_DIM
+    obs = ObsBuilder(layout).build(state, command, gait=False)
+    # heading_error = 0 - 30° → -30° / π
+    assert obs[10] == pytest.approx(np.radians(-30.0) / np.pi, abs=1e-6)
+    assert obs[start + 9] == pytest.approx(0.0, abs=1e-6)
+
+    # 指令 30° 时误差归零、命令块记录 30°/π
+    command = make_command("stand", yaw=theta)
+    obs = ObsBuilder(layout).build(state, command, gait=False)
+    assert obs[10] == pytest.approx(0.0, abs=1e-6)
+    assert obs[start + 9] == pytest.approx(theta / np.pi, abs=1e-6)
+
+
+def test_position_error_in_obs(rig):
+    model, layout, data = rig
+    state = read_state(model, data, layout)
+    target = np.array([0.05, -0.02])
+    obs = ObsBuilder(layout).build(state, make_command("stand"), gait=False)
+    builder = ObsBuilder(layout)
+    builder.reset(target)
+    obs = builder.build(state, make_command("stand"), gait=False)
+    assert obs[11] == pytest.approx(-0.05 * config.POSITION_SCALE, abs=1e-5)
+    assert obs[12] == pytest.approx(0.02 * config.POSITION_SCALE, abs=1e-5)
 
 
 def test_obs_is_clipped(rig):

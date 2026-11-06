@@ -41,6 +41,7 @@ class RobotState:
     base_lin_vel_b: np.ndarray  # (3,) 本体系线速度
     base_ang_vel_b: np.ndarray  # (3,) 本体系角速度
     gravity_b: np.ndarray  # (3,) 本体系中的重力方向（站立时 ≈ (0,0,-1)）
+    yaw_rad: float  # 绝对朝向（躯干前向在水平面的方位角；站姿 = 0）
     q: np.ndarray  # (N,) 站姿相对关节角
     qd: np.ndarray  # (N,)
     foot_pos: np.ndarray  # (2, 3) 足部几何中心，世界系
@@ -69,6 +70,11 @@ def base_z_stand(layout: JointLayout) -> float:
     return float(layout.stand_base_z)
 
 
+def wrap_to_pi(angle: float) -> float:
+    """把角度折到 ``[-π, π)``（朝向误差用）。"""
+    return float((float(angle) + np.pi) % (2.0 * np.pi) - np.pi)
+
+
 def _geom_lowest_z(model, data, geom_id: int) -> float:
     """box 几何的最低顶点世界 z。"""
     half = np.asarray(model.geom_size[geom_id], dtype=np.float64)
@@ -95,8 +101,8 @@ def _floor_contacts(model, data, layout: JointLayout) -> tuple[bool, bool]:
     """返回 ``(body_contact, tail_contact)``：地板与身体/尾巴的接触。
 
     足部接触由 :func:`read_state` 单独统计；这里只看"非足"的接触。
-    尾巴单独区分：T-rex 尾巴作为配重/支撑是设计的一部分，允许接触，
-    只给轻微惩罚；躯干/头/臂/腿着地则视为摔倒并终止。
+    尾巴单独区分：是否允许它支撑由阶段决定（stand/lift/turn 会在尾巴触地时终止）；
+    躯干/头/臂/腿着地一律视为摔倒。
     """
     floor = int(layout.floor_geom_id)
     if floor < 0:
@@ -164,6 +170,8 @@ def read_state(model, data, layout: JointLayout) -> RobotState:
         contact_force[index] = sum(_foot_force(model, data, gid) for gid in geoms)
 
     body_contact, tail_contact = _floor_contacts(model, data, layout)
+    # 绝对朝向：躯干前向轴投影到水平面的方位角（站姿 = 0）。
+    yaw = float(np.arctan2(rot[1, 0], rot[0, 0]))
 
     return RobotState(
         base_pos=np.asarray(data.qpos[0:3], dtype=np.float64).copy(),
@@ -172,6 +180,7 @@ def read_state(model, data, layout: JointLayout) -> RobotState:
         base_lin_vel_b=lin_vel_b,
         base_ang_vel_b=ang_vel_b,
         gravity_b=rot.T @ (-WORLD_UP),
+        yaw_rad=yaw,
         q=q,
         qd=qd,
         foot_pos=foot_pos,

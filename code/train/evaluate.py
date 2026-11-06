@@ -33,6 +33,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="仅 lift：覆盖抬脚高度（m），例如 0.02 / 0.03 / 0.04",
     )
+    parser.add_argument(
+        "--yaw",
+        type=float,
+        default=None,
+        help="仅 stand/turn：固定绝对朝向指令（度），例如 30 / -45",
+    )
     parser.add_argument("--json", default=None, help="把完整结果写到该 JSON 文件")
     return parser.parse_args(argv)
 
@@ -57,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps,
         standup_pose=args.pose,
         lift_h=args.lift_h,
+        yaw_deg=args.yaw,
     )
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
     for record in result["episodes"]:
@@ -67,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
             f"steps={record['steps']} z={record['base_z']:.3f} "
             f"tilt={record['tilt_deg']:.1f} "
             f"foot_z={record['target_foot_z_max']:.3f} "
-            f"body={record['body_contact_rate']:.2f}"
+            f"body={record['body_contact_rate']:.2f} "
+            f"tail={record['tail_contact_rate']:.2f} "
+            f"yaw_err={record['heading_error_mean_deg']:.1f} "
+            f"pos_err={record['position_error_mean']*100:.1f}cm"
         )
     if args.json:
         Path(args.json).write_text(

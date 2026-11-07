@@ -107,6 +107,9 @@ def test_turn_curriculum_ramps_yaw():
 def test_heading_and_position_reward_terms():
     env = DinoWbcEnv("stand", seed=5)
     env.reset(seed=5)
+    # reset 现在会随机挪开基座（位置恢复训练）；先把机器人放回目标点再断言。
+    env.data.qpos[0:2] = env._target_xy
+    mujoco.mj_forward(env.model, env.data)
     state = read_state(env.model, env.data, env.layout)
     command = make_command("stand", yaw=0.0)
     action = np.zeros(config.ACTION_DIM)

@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from . import config
-from .action import action_to_ctrl
+from .action import ActionFilter, action_to_ctrl
 from .curriculum import Curriculum
 from .model_io import JointLayout, load
 from .observation import ObsBuilder, make_command
@@ -88,6 +88,8 @@ class DinoWbcEnv(gym.Env):
 
         self._command = make_command(stage)
         self._prev_action = np.zeros(config.ACTION_DIM, dtype=np.float64)
+        self._prev_prev_action = np.zeros(config.ACTION_DIM, dtype=np.float64)
+        self.action_filter = ActionFilter()
         self._step_count = 0
         self._success_streak = 0
         self._phi_prev = 0.0
@@ -131,8 +133,15 @@ class DinoWbcEnv(gym.Env):
 
         self._reset_pose()
         state = read_state(self.model, self.data, self.layout)
-        # 位置目标 = 复位后的基座 xy；朝向目标是命令里的绝对角度（stand 为 0）。
+        # 位置目标 = 复位后的标称基座 xy；朝向目标是命令里的绝对角度（stand 为 0）。
         self._target_xy = np.asarray(state.base_pos[:2], dtype=np.float64).copy()
+        # 位置恢复训练：把机器人随机挪开，但目标仍是标称点，逼它学会走回去。
+        xy_noise = float(config.RESET_XY_NOISE.get(self.stage, 0.0))
+        if xy_noise > 0.0 and self.stage_config.reset_mode == "stand":
+            self.data.qpos[0] += self.rng.uniform(-xy_noise, xy_noise)
+            self.data.qpos[1] += self.rng.uniform(-xy_noise, xy_noise)
+            mujoco.mj_forward(self.model, self.data)
+            state = read_state(self.model, self.data, self.layout)
         self._command = self._sample_command()
         self.obs_builder.reset(self._target_xy)
         self._command_locked = False
@@ -141,6 +150,8 @@ class DinoWbcEnv(gym.Env):
         )
 
         self._prev_action[:] = 0.0
+        self._prev_prev_action[:] = 0.0
+        self.action_filter.reset()
         self._step_count = 0
         self._success_streak = 0
         self._phi_prev = potential(state, self.layout)
@@ -257,6 +268,9 @@ class DinoWbcEnv(gym.Env):
         if raw.shape[0] != config.ACTION_DIM:
             raise ValueError(f"动作维度应为 {config.ACTION_DIM}，实际 {raw.shape[0]}")
 
+        # 动作低通：训练端和运行端共用，压掉策略输出的高频抖动。
+        applied = self.action_filter.update(raw)
+
         # walk：每 1–3 s 换一次速度指令（含停车/倒车/纯侧向），
         # 让策略见过"加速→停车→倒车→侧移"的切换，而不是整集恒定速度。
         if (
@@ -269,7 +283,7 @@ class DinoWbcEnv(gym.Env):
                 self.rng.integers(*config.WALK_COMMAND_HOLD_RANGE)
             )
 
-        ctrl = action_to_ctrl(raw, self.layout)
+        ctrl = action_to_ctrl(applied, self.layout)
         self.data.ctrl[:] = ctrl
         self._pushed = False
         self._update_push()
@@ -357,7 +371,7 @@ class DinoWbcEnv(gym.Env):
         reward, terms = compute_reward(
             self.stage,
             state,
-            raw,
+            applied,
             self._prev_action,
             self._command,
             self.layout,
@@ -367,6 +381,7 @@ class DinoWbcEnv(gym.Env):
             success=success,
             fallen=fallen,
             target_xy=self._target_xy,
+            prev_prev_action=self._prev_prev_action,
         )
         self._phi_prev = phi
         self._last_terms = terms
@@ -379,8 +394,9 @@ class DinoWbcEnv(gym.Env):
             not terminated and self._step_count >= self.max_episode_steps
         )
 
-        self.obs_builder.push_action(raw)
-        self._prev_action = raw
+        self.obs_builder.push_action(applied)
+        self._prev_prev_action = self._prev_action
+        self._prev_action = applied
 
         info = self._make_info(state, success=success, fallen=fallen)
         info["reward_terms"] = terms

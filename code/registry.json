@@ -1,26 +1,27 @@
 {
   "stand": {
     "stage": "stand",
-    "checkpoint": "checkpoints/stand_20261106_155705/policy.pt",
+    "checkpoint": "checkpoints/stand_20261107_150721/policy.pt",
     "contract_hash": "ff4896b556357e18"
   },
   "lift": {
     "stage": "lift",
-    "checkpoint": "checkpoints/lift_20261106_174810/policy.pt",
+    "checkpoint": "checkpoints/lift_20261107_154655/policy.pt",
     "contract_hash": "ff4896b556357e18"
   },
   "standup": {
     "stage": "standup",
-    "checkpoint": "checkpoints/standup/policy.pt"
+    "checkpoint": "checkpoints/standup_20261107_191557/policy.pt",
+    "contract_hash": "ff4896b556357e18"
   },
   "walk": {
     "stage": "walk",
-    "checkpoint": "checkpoints/walk_20261106_203507/policy.pt",
+    "checkpoint": "checkpoints/walk_20261107_172256/policy.pt",
     "contract_hash": "ff4896b556357e18"
   },
   "turn": {
     "stage": "turn",
-    "checkpoint": "checkpoints/turn_20261106_164923/policy.pt",
+    "checkpoint": "checkpoints/turn_20261107_163622/policy.pt",
     "contract_hash": "ff4896b556357e18"
   }
 }

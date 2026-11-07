@@ -98,16 +98,25 @@ def _common_terms(
     layout: JointLayout,
     command: np.ndarray,
     target_xy: np.ndarray,
+    prev_prev_action: np.ndarray | None = None,
 ) -> dict[str, float]:
     height_error = (state.base_pos[2] - layout.stand_base_z) / HEIGHT_SIGMA
     tilt_error = state.tilt_rad / UPRIGHT_SIGMA
     heading_error = wrap_to_pi(float(command[config.CMD_YAW]) - state.yaw_rad)
     position_error = np.asarray(state.base_pos[:2]) - np.asarray(target_xy)
+    position_dist = float(np.linalg.norm(position_error))
+    position_range = config.POSITION_CLIP / config.POSITION_SCALE
     low_posture = max(
         0.0,
         (layout.stand_base_z - config.LIFT_STANCE_Z_DELTA - state.base_pos[2])
         / config.LIFT_STANCE_Z_DELTA,
     )
+    if prev_prev_action is None:
+        action_jerk = 0.0
+    else:
+        action_jerk = float(
+            np.mean(np.square(action - 2.0 * prev_action + prev_prev_action))
+        )
     return {
         "alive": 1.0,
         "height": float(np.exp(-height_error * height_error)),
@@ -116,12 +125,19 @@ def _common_terms(
         "position": float(
             np.exp(-float(np.dot(position_error, position_error)) / POSITION_SIGMA**2)
         ),
+        # 大误差仍有梯度：0.3 m 处线性归零，避免指数项在 >10 cm 后消失。
+        "position_linear": float(
+            np.clip(1.0 - position_dist / max(position_range, 1e-6), 0.0, 1.0)
+        ),
         "base_vel": float(np.sum(np.square(state.base_lin_vel_b[:2]))),
         "yaw_rate": float(state.base_ang_vel_b[2] ** 2),
-        "foot_contact": 1.0 if bool(state.contact.all()) else 0.0,
+        # 允许单脚支撑/迈步回中；双脚接触作为单独的稳定项备用。
+        "foot_contact": 1.0 if bool(state.contact.any()) else 0.0,
+        "foot_contact_both": 1.0 if bool(state.contact.all()) else 0.0,
         "foot_slip": float(np.mean(np.exp(-20.0 * np.square(state.foot_slip)))),
         "action_mag": float(np.mean(np.square(action))),
         "action_rate": float(np.mean(np.square(action - prev_action))),
+        "action_jerk": action_jerk,
         "joint_posture": float(np.mean(np.square(state.q))),
         "low_posture": float(low_posture),
         "body_contact": 1.0 if state.body_contact else 0.0,
@@ -163,12 +179,20 @@ def _lift_terms(
     }
 
 
-def _walk_terms(state: RobotState, command: np.ndarray, phase: float) -> dict[str, float]:
-    """walk 的速度跟踪 + 步态质量。
+def _walk_terms(
+    state: RobotState,
+    command: np.ndarray,
+    phase: float,
+    target_xy: np.ndarray,
+) -> dict[str, float]:
+    """walk 的速度跟踪 + 步态质量 + 零速停车。
 
     速度核从原来的 ``exp(-4e²)``（1/e ≈ 0.5 m/s）改成按 σ 的形式：
     指令只有 ±0.12 / ±0.06 m/s，旧核几乎饱和，策略不跟踪也拿 0.94。新核对
     5 cm/s 的误差就已经掉到 0.37，能真正驱动前进/倒车/侧移/停车。
+
+    零速门控：指令接近 0 时关闭抬脚/交替接触奖励，改为奖励"双脚站住 + 零速 +
+    位置保持"；否则策略会靠原地踏步拿步态奖励，表现为零指令漂移。
     """
     vx_err = state.base_lin_vel_b[0] - float(command[config.CMD_VX])
     vy_err = state.base_lin_vel_b[1] - float(command[config.CMD_VY])
@@ -176,6 +200,11 @@ def _walk_terms(state: RobotState, command: np.ndarray, phase: float) -> dict[st
     vel_track = float(
         np.exp(-((vx_err / sigma_x) ** 2 + (vy_err / sigma_y) ** 2))
     )
+
+    cmd_speed = float(
+        np.hypot(float(command[config.CMD_VX]), float(command[config.CMD_VY]))
+    )
+    moving = 1.0 if cmd_speed >= config.WALK_STOP_EPS else 0.0
 
     swing = 0 if np.sin(phase) >= 0.0 else 1
     stance = 1 - swing
@@ -191,12 +220,36 @@ def _walk_terms(state: RobotState, command: np.ndarray, phase: float) -> dict[st
         if state.contact[stance]
         else 0.0
     )
+
+    # 停车时的"站住"项：只在指令为零时生效。
+    if moving > 0.0:
+        stop_contact = stop_vel = stop_hold = 0.0
+    else:
+        speed = float(np.hypot(state.base_lin_vel_b[0], state.base_lin_vel_b[1]))
+        pos_err = np.asarray(state.base_pos[:2]) - np.asarray(target_xy)
+        stop_contact = 1.0 if bool(state.contact.all()) else 0.0
+        stop_vel = float(
+            np.exp(-(speed / config.WALK_STOP_VEL_SIGMA) ** 2)
+        )
+        stop_hold = float(
+            np.exp(
+                -float(np.dot(pos_err, pos_err))
+                / config.WALK_STOP_POSITION_SIGMA**2
+            )
+        )
+
     return {
         "vel_track": vel_track,
-        "foot_clearance": float(np.exp(-clearance_error * clearance_error)),
-        "contact_alt": 1.0 if contacts == 1 else (0.3 if contacts == 2 else 0.0),
+        # 步态项按速度门控：零指令时不再奖励抬脚/交替接触。
+        "foot_clearance": float(np.exp(-clearance_error * clearance_error)) * moving,
+        "contact_alt": (
+            1.0 if contacts == 1 else (0.3 if contacts == 2 else 0.0)
+        ) * moving,
         "swing_contact": swing_contact,
         "stance_slip": stance_slip,
+        "stop_contact": stop_contact,
+        "stop_vel": stop_vel,
+        "stop_hold": stop_hold,
     }
 
 
@@ -217,6 +270,7 @@ def compute_reward(
     success: bool = False,
     fallen: bool = False,
     target_xy: np.ndarray | None = None,
+    prev_prev_action: np.ndarray | None = None,
 ) -> tuple[float, dict[str, float]]:
     """计算一步奖励并返回未加权分项。"""
     stage_cfg = config.STAGES.get(stage)
@@ -225,13 +279,21 @@ def compute_reward(
     weights = stage_cfg.reward
     if target_xy is None:
         target_xy = np.zeros(2, dtype=np.float64)
-    terms = _common_terms(state, action, prev_action, layout, command, target_xy)
+    terms = _common_terms(
+        state,
+        action,
+        prev_action,
+        layout,
+        command,
+        target_xy,
+        prev_prev_action=prev_prev_action,
+    )
 
     if stage == "lift":
         gate = (not fallen) and lift_stance_ok(state, layout)
         terms.update(_lift_terms(state, command, gate=gate))
     elif stage == "walk":
-        terms.update(_walk_terms(state, command, phase))
+        terms.update(_walk_terms(state, command, phase, target_xy))
     elif stage == "standup":
         if phi_prev is None:
             phi_prev = phi

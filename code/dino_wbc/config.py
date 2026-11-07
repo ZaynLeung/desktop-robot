@@ -125,9 +125,10 @@ CMD_VEL_SCALE = 10.0
 LIFT_H_SCALE = 25.0
 #: 绝对朝向误差/指令：除以 π 归一到 [-1, 1]。
 HEADING_SCALE = 1.0 / math.pi
-#: 位置误差（m）：放大 10 倍并裁剪到 ±1（对应 ±0.1 m）。
+#: 位置误差（m）：放大 10 倍并裁剪到 ±3（对应 ±0.3 m）。旧版 ±0.1 m 会饱和，
+#: 偏移超过 10 cm 后策略分不清"还差 10 还是 30 cm"。
 POSITION_SCALE = 10.0
-POSITION_CLIP = 1.0
+POSITION_CLIP = 3.0
 
 #: 观测裁剪（防止异常状态把策略推离训练分布）。
 BASE_LIN_VEL_CLIP = 2.0
@@ -186,9 +187,26 @@ WALK_COMMAND_HOLD_RANGE: tuple[int, int] = (50, 150)  # 控制步（20 ms/步）
 WALK_STOP_PROB = 0.20
 #: 摆动脚触地惩罚的阈值（foot_z 低于它算没抬起来）。
 WALK_SWING_CONTACT_Z = 0.005
+#: 零速门控：指令速度低于它视为"停车"，关闭抬脚/交替接触奖励。
+WALK_STOP_EPS = 0.010  # m/s
+#: 停车时"站住"奖励的容差。
+WALK_STOP_VEL_SIGMA = 0.030  # m/s
+WALK_STOP_POSITION_SIGMA = 0.050  # m
 #: walk 课程"成功"的平均 vel_track 阈值。新核对 5 cm/s 误差就掉到 0.37，
 #: 所以 0.85 意味着平均跟踪误差约 2 cm/s；旧阈值 0.60 会让"站着不动"也过关。
 WALK_SUCCESS_VEL_TRACK = 0.85
+
+# ---- 动作平滑 / 外层位置环 ------------------------------------------------
+#: 动作低通（EMA）：a_applied = α·a_raw + (1−α)·a_prev；1.0 = 不滤波。
+#: 训练端和运行端必须用同一个值，否则训练/运行不一致。
+ACTION_FILTER_ALPHA = 0.40
+#: 外层位置环：位置误差 → 速度指令（walk 的内环跟踪）。
+POSITION_LOOP_KP = 1.5  # 1/s
+POSITION_LOOP_KI = 0.30  # 1/s²
+POSITION_LOOP_DEADBAND = 0.015  # m
+POSITION_LOOP_MAX_VX = 0.080  # m/s
+POSITION_LOOP_MAX_VY = 0.040  # m/s
+POSITION_LOOP_I_CLAMP = 0.050  # m·s 量级的积分限幅
 
 # ----------------------------------------------------------------------
 # 时间尺度
@@ -225,10 +243,11 @@ LIFT_HEIGHT_RATIO = 0.8  # 达到指令高度的 80% 即算达标步
 # 用户的 stand 策略实测 400 步朝向漂了 95–137°，因为观测/奖励里没有绝对朝向。
 # 下面这组门限让"偏太多"的 rollout 提前终止，配合 heading/position 奖励项。
 STAND_MAX_HEADING_ERROR_DEG = 30.0
-STAND_MAX_POSITION_ERROR = 0.10  # m
+#: 训练时允许的位置误差（m）。旧版 0.10 m 一超就终止，策略没机会学"走回去"。
+STAND_MAX_POSITION_ERROR = 0.25
 LIFT_MAX_HEADING_ERROR_DEG = 30.0
-LIFT_MAX_POSITION_ERROR = 0.15
-TURN_MAX_POSITION_ERROR = 0.12
+LIFT_MAX_POSITION_ERROR = 0.25
+TURN_MAX_POSITION_ERROR = 0.20
 #: 朝向/位置违规需要连续多少步才终止（避免瞬时尖峰误杀）。
 POSITION_GRACE_STEPS = 5
 
@@ -257,6 +276,15 @@ STAND_KEYFRAME = "stand"
 RESET_Q_NOISE = 0.05  # rad，每个关节均匀噪声 ±
 RESET_BASE_Z_NOISE = 0.005  # m
 RESET_VEL_NOISE = 0.05  # m/s 与 rad/s
+#: 位置恢复训练：reset 时把基座 xy 随机挪开 ±该值（m），位置目标仍是标称点，
+#: 逼策略学会"走回目标"。0 = 不偏移。
+RESET_XY_NOISE: dict[str, float] = {
+    "stand": 0.060,
+    "lift": 0.060,
+    "turn": 0.060,
+    "walk": 0.0,
+    "standup": 0.0,
+}
 SETTLE_STEPS = 8  # reset 后先零控制稳定几步（16 ms），避免初始穿透
 
 # ----------------------------------------------------------------------
@@ -313,13 +341,15 @@ STAGES: dict[str, StageConfig] = {
             "height": 1.5,
             "upright": 1.5,
             "heading": 2.0,
-            "position": 1.5,
+            "position": 2.0,
+            "position_linear": 1.0,
             "base_vel": 0.5,
             "yaw_rate": 0.2,
             "foot_contact": 0.3,
             "foot_slip": 0.3,
             "action_mag": 0.02,
-            "action_rate": 0.001,
+            "action_rate": 0.005,
+            "action_jerk": 0.002,
             "joint_posture": -0.05,
             "low_posture": -2.0,
             "body_contact": -5.0,
@@ -342,12 +372,14 @@ STAGES: dict[str, StageConfig] = {
             "height": 1.0,
             "upright": 1.0,
             "heading": 0.5,
-            "position": 0.5,
+            "position": 1.0,
+            "position_linear": 0.5,
             "base_vel": 0.5,
             "yaw_rate": 0.1,
             "foot_slip": 0.3,
             "action_mag": 0.02,
-            "action_rate": 0.001,
+            "action_rate": 0.02,
+            "action_jerk": 0.01,
             "joint_posture": -0.05,
             "low_posture": -2.0,
             "body_contact": -5.0,
@@ -391,11 +423,16 @@ STAGES: dict[str, StageConfig] = {
             "swing_contact": -0.5,
             "stance_slip": 0.3,
             "foot_slip": 0.2,
+            # 零速停车：关掉步态奖励后，奖励"双脚站住 + 零速 + 位置保持"
+            "stop_contact": 0.3,
+            "stop_vel": 0.5,
+            "stop_hold": 0.5,
             # 朝向/平滑/安全
             "heading": 0.5,
             "yaw_rate": 0.1,
             "action_mag": 0.02,
-            "action_rate": 0.002,
+            "action_rate": 0.02,
+            "action_jerk": 0.01,
             "fall": -5.0,
         },
     ),
@@ -414,11 +451,13 @@ STAGES: dict[str, StageConfig] = {
             "height": 1.5,
             "upright": 1.5,
             "heading": 3.0,
-            "position": 1.0,
+            "position": 1.5,
+            "position_linear": 0.5,
             "base_vel": 0.5,
             "yaw_rate": 0.1,
             "action_mag": 0.02,
-            "action_rate": 0.001,
+            "action_rate": 0.02,
+            "action_jerk": 0.01,
             "joint_posture": -0.05,
             "low_posture": -2.0,
             "body_contact": -5.0,

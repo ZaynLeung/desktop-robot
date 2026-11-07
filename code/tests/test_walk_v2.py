@@ -56,11 +56,51 @@ def test_walk_terms_include_swing_and_stance_quality():
     command = make_command("walk", vx=0.05, vy=0.0)
     action = np.zeros(config.ACTION_DIM)
     _, terms = compute_reward(
-        "walk", state, action, action, command, env.layout
+        "walk", state, action, action, command, env.layout, target_xy=env._target_xy
     )
     env.close()
     for key in ("vel_track", "foot_clearance", "contact_alt", "swing_contact", "stance_slip"):
         assert key in terms
+
+
+def test_walk_stop_gates_gait_and_rewards_holding():
+    """零指令时关闭抬脚/交替接触奖励，改为奖励站住；非零指令时不出现停车项。"""
+    env = DinoWbcEnv("walk", seed=8)
+    env.reset(seed=8)
+    state = read_state(env.model, env.data, env.layout)
+    # reset 后还有残余速度；停车项要测"已经站住"的情况，先清零速度。
+    from dataclasses import replace
+
+    state = replace(state, base_lin_vel_b=np.zeros(3, dtype=np.float64))
+    action = np.zeros(config.ACTION_DIM)
+
+    def terms(vx: float, vy: float) -> dict[str, float]:
+        command = make_command("walk", vx=vx, vy=vy)
+        _, value = compute_reward(
+            "walk",
+            state,
+            action,
+            action,
+            command,
+            env.layout,
+            target_xy=env._target_xy,
+        )
+        return value
+
+    stop = terms(0.0, 0.0)
+    moving = terms(0.05, 0.0)
+    env.close()
+
+    assert stop["foot_clearance"] == 0.0
+    assert stop["contact_alt"] == 0.0
+    assert stop["stop_vel"] > 0.5
+    assert stop["stop_hold"] > 0.9
+    assert "stop_contact" in stop
+
+    assert moving["foot_clearance"] > 0.0
+    assert moving["stop_vel"] == 0.0
+    assert moving["stop_contact"] == 0.0
+    assert moving["stop_hold"] == 0.0
 
 
 # ----------------------------------------------------------------------

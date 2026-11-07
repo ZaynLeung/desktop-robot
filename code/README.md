@@ -106,12 +106,60 @@ cd D:\2026\HKUST\EESM-Robotic\desktop
 > 0 速），并显式覆盖前进/倒车/左移/右移/混合；抬脚权重 0.3→1.0，新增摆动脚触地
 > 惩罚和支撑脚滑移项。旧的 walk checkpoint 虽然还能加载，但不要再用，重训一次。
 
+> **v2.3 抖动/位置恢复（本次）**：
+> * 动作低通 `ACTION_FILTER_ALPHA=0.4`（训练端和运行端共用），`action_rate`
+>   walk/lift/turn 0.001–0.002→0.02，新增 `action_jerk` 项；
+> * walk 零速门控：指令 ≈0 时关闭抬脚/交替接触奖励，改奖励"双脚站住 + 零速 +
+>   位置保持"；
+> * stand/lift/turn reset 时随机把基座挪开 ±6 cm、目标仍是标称点，逼策略学回中；
+>   位置观测 ±0.1→±0.3 m，位置终止 0.10/0.15/0.12→0.25/0.25/0.20 m；
+> * 运行端新增 walk 外层位置环（`--target-x/--target-y`、`T` 键）。
+>
+> 这些改动不改 obs 维度/契约哈希，但旧 checkpoint 的行为分布已经不一致：
+> **walk/lift/turn 建议全部重训，stand 若要位置恢复也重训**；旧 checkpoint 先用
+> `--action-filter-alpha 1.0` 跑。
+
 > **为什么先训 stand**：v1 直接从 lift 开始，策略学成了“躯干撑地 + 蹲着”的局部最优；
 > `stand_20261106_021738` 又出现了朝向漂移（400 步转了 95–137°），因为当时没有绝对
 > 朝向/位置的观测与奖励。v2.2 的 stand 现在是“**原地 + 绝对朝向 0 + 抗轻推 + 尾巴离地**”
 > 的静态基座模型：观测里有朝向/位置误差，奖励里有 heading/position，偏太多会提前终止
 > rollout。lift / turn / walk 都从它的 `model.zip` 热启动。
 > `--log-std-init` 默认 **-1.0**（初始动作更温和）。
+
+### 一键训练（Windows）
+
+`code\run_train.sh` 在 Windows 上不能直接跑（`.sh` 不会被 PowerShell 当脚本执行），
+已改成 **`run_train.ps1`（逻辑） + `run_train.bat`（一键入口）**：
+
+```powershell
+# 双击 code\run_train.bat，或在仓库根目录的 PowerShell 里：
+& .\code\run_train.bat                  # 默认 stand -> lift -> turn -> walk
+& .\code\run_train.bat -Stages walk     # 只训 walk（自动用 registry 里的 stand 热启动）
+& .\code\run_train.bat -Stages stand,lift -Envs 8 -Steps 2000000
+& .\code\run_train.bat -WithStandup     # 额外加 standup
+& .\code\run_train.bat -DryRun          # 只打印将执行的命令
+& .\code\run_train.bat -CheckOnly       # 只做环境自检
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-Stages` | `stand,lift,turn,walk` | 逗号分隔；顺序即执行顺序 |
+| `-Envs` | 16 | 并行环境数 |
+| `-Steps` | 0 | 0 = 每阶段默认（stand 6M，其余 8M） |
+| `-Device` | auto | auto / cpu / cuda |
+| `-Seed` | 0 | 随机种子 |
+| `-WithStandup` | 关 | 追加 standup 阶段 |
+| `-StandCheckpoint` | 空 | 指定 stand 的 `model.zip`（或目录）；不指定时优先 registry，其次最新目录 |
+| `-StandInitFrom` | 空 | stand 阶段自己的 `--init-from`（默认从零训） |
+| `-NoRegister` | 关 | 不自动更新 registry |
+| `-NoCheck` | 关 | 跳过训练前自检 |
+| `-CheckOnly` | 关 | 只自检 |
+| `-DryRun` | 关 | 只打印命令 |
+| `-Python` | conda 环境 | Python 解释器路径 |
+
+脚本会：按顺序训练；自动把本次新训练的 stand `model.zip` 传给 lift/turn/walk；
+日志写到 `code/runs/run_train_<时间戳>.log`；任一阶段失败立即停止并返回非零退出码；
+默认在训练前对每个阶段做 `--check`。
 
 
 产物（默认 `code/checkpoints/<stage>_<时间戳>/`）：
@@ -169,11 +217,19 @@ $py = "E:\conda_envs\desktop-robot\python.exe"
 & $py code/run/run.py --controller walk --record code/videos/walk.mp4
 & $py code/run/run.py --controller lift --headless --seconds 10
 & $py code/run/run.py --controller lift --fast
+
+# walk 位置保持：世界系目标 (x, y)，外层 P/I 环 → vx/vy 指令
+& $py code/run/run.py --controller walk --target-x 0.10 --target-y 0.00
+# 旧 checkpoint（训练时还没有动作低通）先关掉滤波再跑：
+& $py code/run/run.py --controller walk --action-filter-alpha 1.0
 ```
 
 画面：**左 = 第三人称跟随**（平滑跟踪躯干），**右 = 头部第一视角**（`cam_head`，绑定 `head` body），底部 HUD 显示控制器/命令/基座高度/倾角/接触/FPS。
 
-按键（非 headless）：`1–5` **热切换** stand / lift / standup / walk / turn（默认**不重置**环境；standup 例外），`W/S` 调 vx（正=前进、负=倒车），`A/D` 调 vy（正=左、负=右），`X` 停车（vx=vy=0），`L/R` 抬左/右脚，`U` 起身命令，`Z/C` 调 turn 的绝对朝向 ∓5°，`V` 循环 standup 起始姿态（crouch / side / supine，默认仰卧），`P` 手动轻推一下（5 N × 0.1 s），`Space` 复位，`F` 切换跟随相机模式，`Esc` 退出。
+按键（非 headless）：`1–5` **热切换** stand / lift / standup / walk / turn（默认**不重置**环境；standup 例外），`W/S` 调 vx（正=前进、负=倒车），`A/D` 调 vy（正=左、负=右），`X` 停车（vx=vy=0），`T` 开关 walk 位置保持（目标=当前点；按 W/S/A/D/X 会自动接管并关闭），`L/R` 抬左/右脚，`U` 起身命令，`Z/C` 调 turn 的绝对朝向 ∓5°，`V` 循环 standup 起始姿态（crouch / side / supine，默认仰卧），`P` 手动轻推一下（5 N × 0.1 s），`Space` 复位，`F` 切换跟随相机模式，`Esc` 退出。
+
+> **动作低通**：训练端和运行端都默认 `ACTION_FILTER_ALPHA=0.4` 的 EMA；旧 checkpoint 是
+> 没有滤波训练的，运行时会分布不一致，先用 `--action-filter-alpha 1.0` 跑，重训后再用默认值。
 
 > **热切换**：按 `1–5` 里的不同阶段时，机器人保持当前位姿/速度/仿真时间，只换策略；
 > 位置目标改成“当前位置”，步态相位清零，上一步动作保留。`standup` 例外——它的任务
@@ -221,11 +277,11 @@ class Controller(ABC):
 
 | 阶段 | reset | 关键奖励 | 终止 |
 | --- | --- | --- | --- |
-| `stand` | 站姿 + 噪声；朝向指令 0；0–5 N 轻推课程 | 高度 + 相对倾角 + **绝对朝向 + 位置保持** + 双足接触 + 低姿态/关节姿态 | 躯干/头/臂/腿/尾巴着地、z<z0−0.06、倾角>40°、出界、**朝向误差>30° 连续 5 步**、**位置误差>0.10 m** |
-| `lift` | 站姿 + 噪声；随机目标脚、抬脚高度 | 站立/朝向/位置项 + **姿态门限内**的抬脚高度/线性抬脚/支撑脚接触/重心靠支撑脚 | 同 stand（朝向>30°、位置>0.15 m） |
-| `turn` | 站姿 + 噪声；课程绝对朝向（0.3 rad → π），位置保持 | 朝向跟踪（σ 8.6°）+ 位置保持 + 站立项 | 摔倒/躯干/尾巴着地、位置>0.12 m；**不按朝向误差终止** |
+| `stand` | 站姿 + 噪声 + **随机挪开 ±6 cm**；朝向指令 0；0–5 N 轻推课程 | 高度 + 相对倾角 + **绝对朝向 + 位置保持（指数+线性）** + 单脚/双脚接触 + 低姿态/关节姿态 | 躯干/头/臂/腿/尾巴着地、z<z0−0.06、倾角>40°、出界、**朝向误差>30° 连续 5 步**、**位置误差>0.25 m** |
+| `lift` | 站姿 + 噪声 + **随机挪开 ±6 cm**；随机目标脚、抬脚高度 | 站立/朝向/位置项 + **姿态门限内**的抬脚高度/线性抬脚/支撑脚接触/重心靠支撑脚 | 同 stand（朝向>30°、位置>0.25 m） |
+| `turn` | 站姿 + 噪声 + **随机挪开 ±6 cm**；课程绝对朝向（0.3 rad → π），位置保持 | 朝向跟踪（σ 8.6°）+ 位置保持 + 站立项 | 摔倒/躯干/尾巴着地、位置>0.20 m；**不按朝向误差终止** |
 | `standup` | 课程：深蹲(z≈0.14) → 侧躺(90°) → 仰卧(180°) | 势函数进度 `5(γΦ_t−Φ_{t-1})` + 成功 +5 + 脚找地 | 连续站立 0.5 s 成功；超时/出界 |
-| `walk` | 站姿 + 速度指令；训练时每 1–3 s 换一次（含 0 速） | 速度跟踪（σx=5 cm/s、σy=4 cm/s）+ 站直/高度 + 摆动足离地 + 摆动脚不触地 + 交替接触 + 朝向 0 | 跌倒/出界/超时 |
+| `walk` | 站姿 + 速度指令；训练时每 1–3 s 换一次（含 0 速） | 速度跟踪（σx=5 cm/s、σy=4 cm/s）+ 站直/高度 + **速度门控的**抬脚/交替接触 + 摆动脚不触地 + 零速站住 | 跌倒/出界/超时 |
 
 * **尾巴不再作为支撑点**：标称站姿已把尾巴抬离地面（约 4.3 cm）；stand/lift/turn 尾巴触地直接终止。
 * `stand` 成功 = 整集不摔 + 平均高度/朝向/位置项都 >0.8；`lift` 成功 = **连续**保持 ≥0.5 s（不是累计）；`turn` 成功 = 连续 25 步朝向误差 ≤10° 且位置 ≤5 cm。
@@ -246,6 +302,9 @@ class Controller(ABC):
 | 观测缩放/裁剪 | `config.py` 的 `*_SCALE` / `*_CLIP` |
 | 抬脚高度、行走速度范围 | `LIFT_H_RANGE` / `WALK_VX_RANGE` / `WALK_VY_RANGE` |
 | 速度跟踪灵敏度 / 换向频率 / 停车概率 | `WALK_VEL_SIGMA` / `WALK_COMMAND_HOLD_RANGE` / `WALK_STOP_PROB` |
+| 动作平滑/低通 | `ACTION_FILTER_ALPHA`、各阶段奖励里的 `action_rate` / `action_jerk` |
+| 位置恢复训练 | `RESET_XY_NOISE`、`POSITION_CLIP`、`*_MAX_POSITION_ERROR`、奖励里的 `position` / `position_linear` |
+| walk 外层位置环 | `POSITION_LOOP_KP/KI/DEADBAND/MAX_VX/MAX_VY`（或运行端 `--pos-kp/--pos-ki`） |
 | 朝向/位置保持 | `TURN_YAW_RANGE`、`*_MAX_HEADING_ERROR_DEG`、`*_MAX_POSITION_ERROR`、奖励里的 `heading` / `position` |
 | 起身起始姿态 | `STANDUP_POSES`（关节角可直接调） |
 | 尾巴离地高度 | `desktop_robot/dino.py` 的 `stand_tail2_pitch` / `stand_tail4_pitch`（改完重新 `build-dino`） |
@@ -267,6 +326,9 @@ class Controller(ABC):
 | 抬脚时机器人趴/蹲在地上 | v1 的局部最优；已修（躯干着地终止 + 严格高度门限 + 连续保持课程）。若仍出现，先确认 `stand` 已训到验收标准，再用它 warm-start `lift` |
 | walk 加速后停不下来 / 只蹭不走 | v2 已修速度核与训练调度（每 1–3 s 换向、20% 停车、抬脚权重提高）。运行端按 `X` 停车，或按 `S` 把 HUD 的 `vx` 调到 0.00；旧 walk checkpoint 需要重训 |
 | walk 不会倒车/侧移 | v2 的课程显式采样前进/倒车/左移/右移/停车；用 `--vx -0.06`、`--vy ±0.04` 单独评测各方向，若某方向差就增加对应采样比例 |
+| 控制很抖 / 关节高频颤 | v2.3 已加动作低通 `ACTION_FILTER_ALPHA=0.4`、提高 `action_rate`、新增 `action_jerk`；**旧 checkpoint 必须用 `--action-filter-alpha 1.0` 跑**，重训后才用默认滤波。若仍抖，先看是策略输出抖还是关节/接触抖，再调 α / 控制频率 / kv |
+| walk 零指令还漂 / 站不住 | v2.3 已加零速门控（关闭抬脚奖励、奖励双脚+零速+位置保持）；旧 walk checkpoint 需要重训。运行端可 `T` 开位置保持、`--target-x/--target-y` 给世界目标 |
+| stand 被推/挪开后不回中 | v2.3 已加 reset 随机偏移、位置观测 ±0.3 m、位置终止放宽；需要重训 stand。运行端一次仿真内不会自动复位（`Space` 手动），位置保持用 walk 位置环更可靠 |
 | stand 训得很慢 / ep_len 上不去 | 用默认 `--log-std-init -1.0`；确认没有把 `--device cuda` 当默认（物理在 CPU）；必要时把 `--envs` 提到 16 并在普通终端跑 |
 | 按 `Space`/`1–4` 后窗口假死 | 已修：渲染节拍随复位回退 + 每控制步轮询 `cv2.pollKey` |
 | 没有窗口/远程环境 | 用 `--headless`（可配合 `--record`） |
@@ -281,6 +343,9 @@ class Controller(ABC):
 * 没有腰 yaw：不能靠躯干原地转身；侧向行走靠 `hip_roll`/`hip_yaw` 小步幅。
 * walk 的倒车/侧向速度范围很小（vx −0.10…+0.12、vy ±0.06 m/s），侧向步幅受支撑宽度限制；能到多少以评测为准。
 * 运行端热切换不重置环境；`standup` 例外（仍复位到躺倒姿态），`Space` 是手动复位。
+* 动作低通/位置环都是**运行端 + 训练端**配套：旧 checkpoint 与默认 α/位置恢复训练不一致，必须先重训或 `--action-filter-alpha 1.0`。
+* 外层位置环只是把位置误差变成 walk 速度指令；能不能真正到位取决于 walk 策略的速度跟踪质量（v2 已加强，但仍受 0.12 m/s 上限和步态限制）。
+* stand 的位置恢复依赖"允许迈步 + reset 偏移"训练；如果策略仍选择原地倾斜，它只能在几厘米内保持，不会走回 10 cm 外的目标。
 * 双脚不迈步时髋 yaw 的躯干转向权限只有约 ±10°；turn 阶段的大角度需要策略学 pivoting/踏步，能到多少以训练结果为准。
 * 尾巴不再作为支撑点；标称站姿尾巴离地约 4.3 cm，姿态大时仍可能擦地（会终止）。
 * `kp=25` 偏软，是原模型的执行器设定；需要更强跟随可在 `model_io.load` 里覆盖。
@@ -305,7 +370,7 @@ cd D:\2026\HKUST\EESM-Robotic\desktop
 ## 2 转向（用 stand 的 model.zip 热启动；课程 0.3 rad → π）
 & $py code/train/train.py --stage turn --envs 16 --steps 8000000 --device auto --init-from code/checkpoints/stand_20261106_155705/model.zip
 ## 3 翻正起身（用 stand 的 model.zip 热启动）
-& $py code/train/train.py --stage standup --envs 16 --steps 8000000 --device auto --init-from code/checkpoints/stand_20261106_155705model.zip
+& $py code/train/train.py --stage standup --envs 16 --steps 8000000 --device auto --init-from code/checkpoints/stand_20261106_155705/model.zip
 
 ## 4 前后左右行走 + 停车（walk v2；旧 walk checkpoint 需重训）
 & $py code/train/train.py --stage walk --envs 16 --steps 8000000 --device auto --init-from code/checkpoints/stand_20261106_155705/model.zip

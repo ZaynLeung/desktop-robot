@@ -16,6 +16,7 @@
     W / S      vx ±0.02（walk；负=倒车）
     A / D      vy ±0.02（walk；正=左、负=右）
     X          walk 停车（vx=vy=0）
+    T          walk 位置保持开关（目标=当前点；或用 --target-x/--target-y）
     L / R      抬脚目标脚：左脚 / 右脚
     U          命令切成 standup
     Z / C      turn 阶段的绝对朝向指令 ∓5°
@@ -39,10 +40,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from dino_wbc import config, model_io
-from dino_wbc.action import action_to_ctrl
+from dino_wbc.action import ActionFilter, action_to_ctrl
 from dino_wbc.cameras import CameraNotFoundError, DualRenderer, FollowCamera, HeadCamera
 from dino_wbc.controllers.registry import load_controller
 from dino_wbc.observation import ObsBuilder, make_command
+from dino_wbc.position_loop import PositionLoop
 from dino_wbc.render import (
     VideoRecorder,
     advance_render_clock,
@@ -146,6 +148,36 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="turn 阶段的绝对朝向指令（度）；stand 固定为 0",
     )
+    parser.add_argument(
+        "--target-x",
+        type=float,
+        default=None,
+        help="walk 位置环的世界系目标 x（m）；给任意一个 target 即启用位置环",
+    )
+    parser.add_argument(
+        "--target-y",
+        type=float,
+        default=None,
+        help="walk 位置环的世界系目标 y（m）",
+    )
+    parser.add_argument(
+        "--pos-kp",
+        type=float,
+        default=config.POSITION_LOOP_KP,
+        help="位置环比例增益（1/s）",
+    )
+    parser.add_argument(
+        "--pos-ki",
+        type=float,
+        default=config.POSITION_LOOP_KI,
+        help="位置环积分增益（1/s²）",
+    )
+    parser.add_argument(
+        "--action-filter-alpha",
+        type=float,
+        default=config.ACTION_FILTER_ALPHA,
+        help="动作低通 α；1.0 = 关闭（旧 checkpoint 兼容用）",
+    )
     return parser
 
 
@@ -171,6 +203,12 @@ class Runner:
             checkpoint=args.checkpoint,
         )
         self.obs_builder = ObsBuilder(self.layout)
+        self.action_filter = ActionFilter(alpha=args.action_filter_alpha)
+        self.position_loop = PositionLoop(kp=args.pos_kp, ki=args.pos_ki)
+        if args.target_x is not None or args.target_y is not None:
+            self.position_loop.reset(
+                (float(args.target_x or 0.0), float(args.target_y or 0.0))
+            )
         self.command = self._new_command(self.controller.stage)
         self.follow_cam = FollowCamera()
         self.follow_cam.set_tracking(not args.no_follow)
@@ -285,12 +323,23 @@ class Runner:
             state = read_state(self.model, self.data, self.layout)
             self._last_state = state
             stage_config = config.STAGES[self.controller.stage]
+            # 外层位置环（仅 walk）：位置误差 → 体坐标系 vx/vy 指令。
+            if self.position_loop.enabled and self.controller.stage == "walk":
+                vx, vy = self.position_loop.update(
+                    state.base_pos[:2], state.yaw_rad
+                )
+                self.command[config.CMD_VX] = vx
+                self.command[config.CMD_VY] = vy
+                self._target_xy = self.position_loop.target_xy.copy()
+                self.obs_builder.target_xy = self._target_xy.copy()
             obs = self.obs_builder.build(
                 state, self.command, gait=stage_config.gait
             )
             action = np.clip(self.controller.act(obs), -1.0, 1.0).astype(np.float64)
-            self.obs_builder.push_action(action)
-            self.data.ctrl[:] = action_to_ctrl(action, self.layout)
+            # 动作低通：与训练端同一个 α，压掉高频抖动。
+            applied = self.action_filter.update(action)
+            self.obs_builder.push_action(applied)
+            self.data.ctrl[:] = action_to_ctrl(applied, self.layout)
 
             # 2) 手动轻推（P 键）：在物理步之前设置外力，持续 0.1 s
             if self._manual_push_steps > 0:
@@ -389,7 +438,7 @@ class Runner:
         position_error = float(
             np.linalg.norm(np.asarray(state.base_pos[:2]) - self._target_xy)
         )
-        return [
+        lines = [
             controller_line,
             (
                 f"cmd {task} vx={command[config.CMD_VX]:+.2f} "
@@ -412,6 +461,13 @@ class Runner:
                 f"{'FAST' if self.args.fast else 'realtime'}"
             ),
         ]
+        if self.position_loop.enabled:
+            target = self.position_loop.target_xy
+            lines.append(
+                f"pos_loop ON target=({target[0]:+.2f},{target[1]:+.2f})m "
+                f"err={position_error*100:.1f}cm (T 关闭)"
+            )
+        return lines
 
     # ------------------------------------------------------------------
     # 键盘
@@ -426,7 +482,44 @@ class Runner:
             self._switch_task(TASK_KEYS[key])
             return
 
+        if key in (ord("t"), ord("T")):
+            # T：walk 位置保持开关（目标 = 当前基座 xy 或 --target-x/y）
+            if self.controller.stage != "walk":
+                print("[提示] T 位置保持只在 walk 阶段生效（先按 4 切到 walk）。")
+                return
+            if self.position_loop.enabled:
+                self.position_loop.disable()
+                self.command[config.CMD_VX] = 0.0
+                self.command[config.CMD_VY] = 0.0
+                print("位置保持：关闭")
+            else:
+                target = np.asarray(self.data.qpos[:2], dtype=np.float64)
+                self.position_loop.reset(target)
+                self._target_xy = self.position_loop.target_xy.copy()
+                self.obs_builder.target_xy = self._target_xy.copy()
+                print(
+                    f"位置保持：开启（目标 x={target[0]:+.3f} y={target[1]:+.3f} m）"
+                )
+            return
+
         command = self.command
+        # 手调速控优先：一旦按 W/S/A/D/X，就关闭位置环，避免外层环每步覆盖。
+        if self.position_loop.enabled and key in (
+            ord("w"),
+            ord("W"),
+            ord("s"),
+            ord("S"),
+            ord("a"),
+            ord("A"),
+            ord("d"),
+            ord("D"),
+            ord("x"),
+            ord("X"),
+        ):
+            self.position_loop.disable()
+            command[config.CMD_VX] = 0.0
+            command[config.CMD_VY] = 0.0
+            print("位置保持已关闭：手动速度接管")
         if key in (ord("w"), ord("W")):
             command[config.CMD_VX] = float(
                 np.clip(
@@ -549,6 +642,10 @@ class Runner:
             self._last_state.base_pos[:2], dtype=np.float64
         ).copy()
         self.obs_builder.target_xy = self._target_xy.copy()
+        if self.position_loop.enabled and self.controller.stage == "walk":
+            # 热切换到 walk：位置环目标继续生效（不要退回"当前位置"）。
+            self._target_xy = self.position_loop.target_xy.copy()
+            self.obs_builder.target_xy = self._target_xy.copy()
         # 新策略的步态时钟从 0 开始；上一步动作保留（对连续控制更自然）。
         self.obs_builder.phase = 0.0
         self.data.xfrc_applied[:] = 0.0
@@ -574,8 +671,14 @@ class Runner:
         self._target_xy = np.asarray(
             self._last_state.base_pos[:2], dtype=np.float64
         ).copy()
+        if self.position_loop.enabled:
+            # 保留位置环目标，只清积分（机器人已经换位姿，旧积分会推着走）。
+            self.position_loop.reset(self.position_loop.target_xy.copy())
+            if self.controller.stage == "walk":
+                self._target_xy = self.position_loop.target_xy.copy()
         self.obs_builder.reset(self._target_xy)
         self.controller.reset()
+        self.action_filter.reset()
         self.follow_cam.initialized = False
         self.command = self._new_command(self.controller.stage)
         self._sync_target_foot()

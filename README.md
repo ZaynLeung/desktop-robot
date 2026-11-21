@@ -189,7 +189,7 @@ python -m pytest
 ```
 
 **恐龙**：同样是"先改参数源、再重新生成"，只是参数源在 `desktop_robot/dino.py` 的
-`DEFAULT_DINO_SPEC`：
+`DEFAULT_DINO_SPEC` / `DinoEnvSpec`：
 
 ```python
 from dataclasses import replace
@@ -203,6 +203,24 @@ write_dino_models(spec)
 python -m desktop_robot build-dino
 python -m desktop_robot verify-dino --dynamic
 python -m pytest tests/test_dino.py tests/test_dino_mujoco.py
+```
+
+如果还要把 `models/dino.xml` 导出成 URDF，可以额外安装转换工具：
+
+```powershell
+pip install mjcf2urdf
+python .agents/misc/py/export_dino_urdf.py --build-first
+```
+
+这个脚本默认读取 `models/dino.xml`，把 URDF 产物写到 `build/urdf/dino/`。如果只想转换当前
+已经生成好的 MJCF，也可以直接：
+
+```powershell
+python .agents/misc/py/export_dino_urdf.py
+```
+
+```powershell
+python export_dino_urdf.py
 ```
 
 `models/*.xml` 虽然是生成物，但**提交进 git**——这样没有 Python 环境的人也能

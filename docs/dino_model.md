@@ -14,13 +14,13 @@
 
 | 项目 | 数值 |
 | --- | --- |
-| 外形包络（长 × 宽 × 高） | **0.344 × 0.150 × 0.238 m**（尾巴占后段 236 mm） |
+| 外形包络（长 × 宽 × 高） | **0.344 × 0.150 × 0.238 m**（结构件；算上头顶 MG90 包络最高到 0.249 m） |
 | 站立总高（脚底→头顶） | ≈ 0.238 m |
-| 总质量（体积 × PLA 1240 kg/m³） | ≈ 2.22 kg（只算塑料件，不含舵机 / 电池） |
+| 总质量（体积 × PLA 1240 kg/m³） | ≈ 2.23 kg（只算塑料件，不含舵机 / 电池） |
 | 驱动关节 | 18 个（俯仰 pitch 9 / 偏航 yaw 5 / 内外翻 roll 4）+ 6 自由度浮动基座 |
 | `nq / nv / nu` | 25 / 24 / 18 |
-| body 数量 | 20（尾巴 4 节；每条腿 6 个：三段髋安装板 + 大腿 + 小腿 + 足） |
-| 几何 | 24 个结构 box + **8 个电机包络**（髋 3×2、颈 2）+ 10 个视觉轴承圆柱，无外部网格 |
+| body 数量 | 21（颈 pitch 段 1 + 头 1；尾巴 4 节；每条腿 6 个：三段髋安装板 + 大腿 + 小腿 + 足） |
+| 几何 | 25 个结构 box（含颈段 20 mm 立柱）+ **8 个电机包络**（髋 3×2、颈 2）+ 10 个视觉轴承圆柱，无外部网格 |
 | 传感器 | 1 个头部相机 `cam_head`（挂在 `head` body 上） |
 | 站立基座高度 | 0.1517 m（由正运动学反解，保证足底刚好贴地） |
 | 髋部电机 | 3 × ROBOTIS `XC330-T181-T`（20 × 34 × 26 mm，D 沿输出轴；电机体缩进连杆、彼此不相交） |
@@ -48,8 +48,9 @@
 
 ```text
 torso（浮动基座，freejoint: root）
-├─ head          [neck_pitch]          ①（上下）→ [neck_yaw] ②（左右）
-│                └─ camera cam_head（头部前视相机，随颈 / 头一起转）
+├─ neck          [neck_pitch]          ①（上下）；body 里还有一根 20 mm 立柱 neck_geom
+│  └─ head       [neck_yaw]            ②（左右，轴 z）
+│                 └─ camera cam_head（头部前视相机，随头一起转）
 ├─ arm_L         [shoulder_pitch_L]    ③
 ├─ arm_R         [shoulder_pitch_R]    ④
 ├─ hip_pitch_L   [hip_pitch_L]         ⑤（主髋块）
@@ -79,8 +80,11 @@ pitch 板的后面、yaw 缩进 roll 板的下方。每段 body 的原点相对�
 （深灰 `motor_*`），并按「pitch 往内、roll 往后、yaw 往下」错开，包络两两不相交。
 髋部三台是 XC330-T181-T（20 × 34 × 26 + 2 mm 间隙）；**颈部两台都是 MG90**
 （22.8 × 12.2 × 28.5 mm，轴沿 28.5、过 22.8 × 12.2 端面中心），并且都以颈关节为中心
-左右对称：pitch 的机体横着跨在颈上，yaw 的机体在正下方（按 `stand_neck` 的低头角
-往下让了约 27 mm 避开 pitch）。
+左右对称：pitch 的机体横着跨在颈上。颈部的两段之间有一根 **20 mm 的真实立柱**
+（`neck` body 上的 `neck_geom`，`neck_joint_offset` = 20 mm）：`neck` body 带 pitch 关节、
+立柱从 0 长到 20 mm，`head` body 顶在立柱上、带 yaw 关节，所以两台电机的关节沿轴向
+正好隔开 20 mm，实测包络间隙约 10 mm。这条立柱让运动学链里出现一个真实连杆，
+而不是把 20 mm 藏在关节锚点里。
 这条约束由 `tests/test_dino_mujoco.py::test_joint_volumes_do_not_intersect` 用分离轴
 定理（SAT）逐对验证，包括 3 块髋安装板彼此之间也不相交。
 
@@ -89,8 +93,9 @@ pitch 板的后面、yaw 缩进 roll 板的下方。每段 body 的原点相对�
 | 连杆 | 形状 | 全尺寸 (x, y, z) | 相对父关节偏移 | 长度来源 |
 | --- | --- | --- | --- | --- |
 | torso | box | 0.210 × 0.0665 × 0.0595 | —（基座原点＝几何中心） | — |
-| head | box | 0.070 × 0.0504 × 0.0385 | 颈在 torso (0.0385, 0, 0.035)；头中心再 (+0.0224, 0, +0.0154) | 显式偏移 |
-| `cam_head` | 相机（无质量） | — | 相对 head body 原点 (0.0602, 0, 0.0182)，贴在脸部前方 | `head_camera_pos` |
+| neck | box（立柱） | 0.020 × 0.014 × 0.020 | pitch 关节在 torso (0.0385, 0, 0.035)；立柱从关节沿 +z 长 20 mm（中心 z = +0.010） | `neck_size`、`neck_joint_offset` |
+| head | box | 0.070 × 0.0504 × 0.0385 | head body 在 neck body 上方 20 mm；头中心再 (+0.0224, 0, −0.0046)（相对 head body） | 显式偏移 |
+| `cam_head` | 相机（无质量） | — | 相对 head body 原点 (0.0602, 0, −0.0018)，贴在脸部前方 | `head_camera_pos` |
 | arm_L/R | box | 0.0315 × 0.0224 × 0.0525 | 肩在 torso (0.0336, ±0.0406, 0.0126)；中心 (0, 0, −臂长/2) | `arm_size[2]` |
 | `hip_pitch_L/R` | box（安装板 1） | 0.020 × 0.013 × 0.034 | 主髋在 torso (−0.0595, ±0.0315, −0.021)；x=W、y=板厚(轴向)、z=H，中心 (0, ±0.0065, 0) | `hip_pitch_size`、`hip_roll_offset` |
 | `hip_roll_L/R` | box（安装板 2） | 0.013 × 0.020 × 0.034 | 在内外翻关节上；x=板厚(轴向)、y=W、z=H，中心 (0.0065, 0, 0) | `hip_roll_size`、`hip_yaw_offset` |
@@ -118,14 +123,14 @@ pitch 板的后面、yaw 缩进 roll 板的下方。每段 body 的原点相对�
 | `motor_hip_roll_L/R` | XC330 | `hip_pitch_*` | 沿 −x 往后伸 26 mm（贴在 roll 关节后方） | 0.028 × 0.022 × 0.036 |
 | `motor_hip_yaw_L/R` | XC330 | `hip_roll_*` | 沿 −z 往下伸 26 mm | 0.022 × 0.036 × 0.028 |
 | `motor_neck_pitch` | MG90 | `torso` | 轴沿 y、横跨在颈关节上（y 方向居中） | 0.0248 × 0.0305 × 0.0142 |
-| `motor_neck_yaw` | MG90 | `head` | 轴沿 z、在颈关节正下方让 ~27 mm | 0.0248 × 0.0142 × 0.0305 |
+| `motor_neck_yaw` | MG90 | `head` | 轴沿 z；head body 已在 yaw 关节处，机体从这个原点往上伸（底面与关节齐平） | 0.0248 × 0.0142 × 0.0305 |
 
 ## 5. 关节
 
 | 关节 | 父 → 子 | 轴 | 范围 (rad) | kp / kv | 力矩上限 |
 | --- | --- | --- | --- | --- | --- |
 | `neck_pitch` | torso → head | (0, −1, 0) | ±0.70 | 25 / 1.0 | ±2.5 N·m |
-| `neck_yaw` | head（pitch 之后） | (0, 0, 1) | ±0.60 | 25 / 1.0 | ±2.5 N·m |
+| `neck_yaw` | neck（20 mm 立柱之后） | (0, 0, 1) | ±0.60 | 25 / 1.0 | ±2.5 N·m |
 | `shoulder_pitch_L/R` | torso → arm | (0, −1, 0) | ±1.20 | 25 / 1.0 | ±2.5 N·m |
 | `hip_pitch_L/R` | torso → hip_pitch 块 | (0, −1, 0) | ±1.20 | 25 / 1.0 | ±2.5 N·m |
 | `hip_roll_L/R` | hip_pitch 块 → hip_roll 块 | (1, 0, 0) / (−1, 0, 0) | ±0.35 | 25 / 1.0 | ±2.5 N·m |
@@ -187,7 +192,7 @@ v2.2 起尾巴 pitch 改成 −0.10 / −0.05（原来是 0.18 / 0.14）：尾�
 
 | 字段 | 值 | 含义 |
 | --- | --- | --- |
-| `head_camera_pos` | (0.0602, 0, 0.0182) | 相对 `head` body 原点的位置，贴在脸部前方 |
+| `head_camera_pos` | (0.0602, 0, −0.0018) | 相对 `head` body 原点的位置，贴在脸部前方 |
 | `head_camera_xyaxes` | `0 -1 0 0.2079 0 0.9781` | 相机 x 轴（画面右方）与 y 轴（画面上方）；相机沿自身的 −z 方向看，因此相对头部**下俯 12°** |
 | `head_camera_fovy` | 75.0 | 竖直视场角（度） |
 
@@ -244,6 +249,7 @@ write_dino_models(spec)                 # 重新生成 models/dino.xml + dino_sc
 | --- | --- | --- |
 | `hip_motor_size` | `(0.020, 0.034, 0.026)` | XC330 的 W × H × D，**D 沿输出轴** |
 | `head_motor_size` | `(0.0228, 0.0122, 0.0285)` | MG90 的 W × T × H，**H 沿输出轴**（轴过 W×T 面中心） |
+| `neck_joint_offset` | `0.020` | 颈 pitch 段到 yaw 段的立柱长度（`neck_geom` 的高度） |
 | `hip_motor_clearance` | `0.001` | 每侧装配间隙（打印件 1 mm） |
 | `hip_pitch_size` | `(0.020, 0.013, 0.034)` | 板端面 = W × H，轴向板厚 13 mm |
 | `hip_roll_size` | `(0.013, 0.020, 0.034)` | 同上（轴向在 x） |
@@ -286,6 +292,7 @@ python -m pytest tests/test_dino.py tests/test_dino_mujoco.py
 python .agents/misc/py/render_dino_previews.py  # 重出本文档用的预览图
 python .agents/misc/py/export_dino_urdf.py --build-first   # 导出 build/urdf/dino
 python .agents/misc/py/export_dino_cad.py                  # 导出 build/cad/dino
+python .agents/misc/py/export_dino_kinematics.py           # 导出 build/kinematics（运动学表）
 ```
 
 `export_dino_cad.py` 一次写三组文件，用途不同：
@@ -320,7 +327,7 @@ SolidWorks 里编辑零件的推荐流程：关掉 3D Interconnect 打开 `assem
    不是驱动自由度。所以下蹲 / 上坡 / 落地缓冲时，足底不再能靠踝主动压平，
    只能由 `hip_pitch` + `knee` 组合保证——这是本版相对上一版（踝 pitch）的主要取舍。
 7. **质量只算塑料件**：`density = 1240 kg/m³`（PLA），直接 `建模体积 × 密度`，
-   不摊舵机 / 电池 / PCB；总质量 2.22 kg 是"实心 PLA 体积"的估计值，舵机等附加质量
+   不摊舵机 / 电池 / PCB；总质量 2.23 kg 是"实心 PLA 体积"的估计值，舵机等附加质量
    由使用者自行均摊。换材料只改 `DinoSpec.density`（ABS 1040 / PETG 1270 / 尼龙 1140）。
    MuJoCo 实测 `body_subtreemass` 与 `total_mass()` 一致（电机包络密度为 0，不计入）。
 8. 连杆之间不碰撞（只有足和地板接触），避免仿真里相邻零件互相弹开。

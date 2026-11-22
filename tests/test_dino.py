@@ -75,7 +75,7 @@ def test_dof_counts():
     assert spec.nq == 25  # 7 自由基座 + 18 个驱动关节
     assert spec.nv == 24
     assert spec.nu == 18
-    assert spec.n_bodies == 20  # 每腿 6 个 body：三段髋块 + 大腿 + 小腿 + 足
+    assert spec.n_bodies == 21  # 每腿 6 个 body + 颈 pitch 段 1 个（躯干/头/臂/尾另算）
     assert len(spec.joint_names) == 18
 
 
@@ -251,6 +251,32 @@ def test_hip_mount_plates_cover_the_xc330_and_leave_room_for_the_body():
     # 电机体往「上一级连杆」里缩 26 mm：pitch 要能进躯干、yaw 要能进大腿
     assert spec.hip_pos[1] - d > -spec.torso_size[1] / 2.0
     assert abs(spec.thigh_offset[2]) + spec.thigh_size[2] >= d
+
+
+def test_neck_has_a_real_spacer_link_between_the_two_joints():
+    """颈部两关节之间有 20 mm 的真实连杆：neck body（pitch 段）→ head body（yaw 段）。"""
+    spec = DEFAULT_DINO_SPEC
+    assert spec.neck_joint_offset == pytest.approx(0.020)
+    root = ET.fromstring(render_dino_xml(spec))
+    neck = root.find(".//body[@name='neck']")
+    head = neck.find("body[@name='head']")
+    assert head is not None, "head 必须是 neck 的子 body"
+    # head 相对 neck 的偏移就是立柱长度
+    assert [float(v) for v in head.get("pos").split()] == pytest.approx(
+        [0.0, 0.0, spec.neck_joint_offset]
+    )
+    # 两个关节各自挂在对应 body 的原点上
+    assert [float(v) for v in neck.find("joint").get("pos").split()] == [0.0, 0.0, 0.0]
+    assert [float(v) for v in head.find("joint").get("pos").split()] == [0.0, 0.0, 0.0]
+    # 立柱是真实几何：高度 = 立柱长度
+    pillar = neck.find("geom[@name='neck_geom']")
+    assert pillar is not None
+    size = [float(v) for v in pillar.get("size").split()]
+    assert size[2] == pytest.approx(spec.neck_joint_offset / 2.0)
+    # 立柱沿 z 从 0 长到 offset
+    assert [float(v) for v in pillar.get("pos").split()][2] == pytest.approx(
+        spec.neck_joint_offset / 2.0
+    )
 
 
 def test_joint_motors_are_all_modelled_and_unique():

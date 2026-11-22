@@ -8,7 +8,7 @@ EESM 5800「桌面伴侣机器人」课程项目的仿真工程。
 | 机型 | 造型 | 驱动关节 | 站立高度 | 总质量 | `nq / nv / nu` | 模型文件 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `desktop_biped` | 腰部 + 双足 | 9 | ≈ 0.310 m | ≈ 1.51 kg | 16 / 15 / 9 | `models/biped.xml` |
-| `desktop_dino` | 霸王龙（头 + 双臂 + 双足 + 4 节尾 + 头部相机） | 18 | ≈ 0.238 m | ≈ 2.22 kg | 25 / 24 / 18 | `models/dino.xml` |
+| `desktop_dino` | 霸王龙（头 + 双臂 + 双足 + 4 节尾 + 头部相机） | 18 | ≈ 0.238 m | ≈ 2.23 kg | 25 / 24 / 18 | `models/dino.xml` |
 
 设计细节、坐标约定、简化假设见：
 **双足** → [`docs/model_design.md`](docs/model_design.md)；
@@ -156,7 +156,8 @@ pelvis ──waist_yaw───────────────────�
 
 ```
 torso（浮动基座）
-├─ head      neck_pitch（上下）→ neck_yaw（左右，轴 z）  + cam_head 头部前视相机
+├─ neck      neck_pitch（上下）；neck 上还有一根 20 mm 立柱（真实连杆）
+│  └─ head   neck_yaw（左右，轴 z）  + cam_head 头部前视相机
 ├─ arm_L/R   shoulder_pitch_L/R      单段小手臂
 ├─ hip_pitch_L/R（安装板，轴 y）→ hip_roll_L/R（内外翻板，轴 x）→ hip_yaw_L/R（脚尖偏航板，轴 z）
 │  └─ thigh（无关节）→ shank  knee_L/R
@@ -168,12 +169,13 @@ torso（浮动基座）
   髋 / 脚尖 yaw / 踝互为镜像（**同一正角度 = 外翻 / 脚尖外旋**），躯干没有单独的腰 yaw。
   髋部三段各是一块 13 mm 厚的安装板，端面按 **XC330-T181-T**（20 × 34 × 26 mm）开；
   **电机体缩进上一级连杆**（深灰 `motor_*` 包络显式画出），8 个电机包络两两不相交；
-  头部两台都是 **MG90**（22.8 × 12.2 × 28.5 mm），以颈关节为中心左右对称摆放。
+  头部两台都是 **MG90**（22.8 × 12.2 × 28.5 mm），pitch/yaw 之间有一根 20 mm 的
+  真实立柱（`neck` body 的 `neck_geom`），两台电机的关节沿轴向隔开 20 mm。
 * 足底水平判据：`base_pitch + 髋 + 膝 + 足部安装角 = 0`；踝是 roll，不再参与矢状面，
   站姿里 `foot_mount_pitch` 由生成器自动反解（+2.92°），踝站姿角恒为 0。
 * 外形包络 `0.344 × 0.150 × 0.238 m`；标称站姿 `stand` 基座高 `0.1517 m`，
   每个 link 的长度都在 [`dino.py`](desktop_robot/dino.py) 的 `*_size` 里，改长度会自动带动下游关节。
-* 质量只算塑料件：`density = 1240 kg/m³`（PLA），直接体积 × 密度 ≈ `2.22 kg`，
+* 质量只算塑料件：`density = 1240 kg/m³`（PLA），直接体积 × 密度 ≈ `2.23 kg`，
   不含舵机 / 电池（附加质量自行均摊；电机包络密度为 0）。
 * 脚跟比原设计长 14 mm（`foot_size[0]` 73.5 mm，前趾位置不变），站姿质心余量「后 30 / 前 59」mm。
 * 头部相机 `cam_head` 挂在 `head` body 上（随头转动，相对头部下俯 12°、站姿净视线约下俯

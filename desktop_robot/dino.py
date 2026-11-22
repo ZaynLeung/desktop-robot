@@ -7,8 +7,9 @@
 拓扑（18 个驱动关节：俯仰 pitch 9 / 偏航 yaw 5 / 内外翻 roll 4）：::
 
     torso（浮动基座，freejoint: root）
-    ├─ head          neck_pitch ①（上下） → neck_yaw ②（左右，轴 z）
-    │                └─ 相机 cam_head（头部前视相机，随头一起转）
+    ├─ neck          neck_pitch ①（上下）
+    │  └─ head       neck_yaw ②（左右，轴 z）   ← 两段之间一根 20 mm 立柱（neck_geom）
+    │                 └─ 相机 cam_head（头部前视相机，随头一起转）
     ├─ arm_L         shoulder_pitch_L ③（上下）
     ├─ arm_R         shoulder_pitch_R ④（上下）
     ├─ hip_pitch_L   ⑤（主髋块，轴 y，上下）
@@ -162,17 +163,23 @@ class DinoSpec:
     # ---- 躯干：直接做浮动基座（图中没有腰关节）----
     torso_size: Vec3 = (0.210, 0.0665, 0.0595)
 
-    # ---- 头：颈关节位置相对躯干中心；头几何中心相对颈关节 ----
+    # ---- 头：颈 pitch 段 → 20 mm 立柱 → 头（yaw 段）----
+    # ``neck_pos`` 是颈 pitch 关节在躯干上的位置；``neck`` body 是 pitch 段（含 20 mm 立柱），
+    # 头 body 在它上面 :attr:`neck_joint_offset` 处（yaw 关节在头 body 原点）。
+    # 下面两个偏移都相对**头 body 原点**（也就是 yaw 关节）。
     head_size: Vec3 = (0.070, 0.0504, 0.0385)
     neck_pos: Vec3 = (0.0385, 0.0, 0.035)
-    head_offset: Vec3 = (0.0224, 0.0, 0.0154)
+    #: 颈 pitch 段到 yaw 段之间那根短立柱（真实连杆）的截面；高度固定为
+    #: :attr:`neck_joint_offset`，见 :attr:`neck_geom_size`。
+    neck_size: Vec3 = (0.020, 0.014, 0.0)
+    head_offset: Vec3 = (0.0224, 0.0, -0.0046)
 
     # ---- 头部相机：挂在 head body 上，随颈/头一起转（第一人称观测用）----
     # pos 相对 head body 原点，贴在头部前方脸上；xyaxes = (相机 x 轴, 相机 y 轴)，
     # 相机沿 −z 看：x = (0,−1,0)（画面右方 = −y）、y = (sin12°, 0, cos12°)，
     # 于是视轴 = (cos12°, 0, −sin12°)，即朝 +x 前方、相对头部下俯 12°。
     # 站姿下头部净俯仰约 +5.7°，所以相机世界视线约下俯 6.3°，能看到更多前方地面。
-    head_camera_pos: Vec3 = (0.0602, 0.0, 0.0182)
+    head_camera_pos: Vec3 = (0.0602, 0.0, -0.0018)
     head_camera_xyaxes: str = "0 -1 0 0.2079 0 0.9781"
     head_camera_fovy: float = 75.0
 
@@ -199,9 +206,12 @@ class DinoSpec:
     # 于是三个电机包络两两不相交（见 tests 里的 SAT 断言）。hip_* 只是 10 mm 厚的安装板。
     hip_motor_size: Vec3 = (0.020, 0.034, 0.026)  # XC330: W, H, D
     hip_motor_clearance: float = 0.001  # 每侧装配间隙（打印件 1 mm）
-    #: 头部 pitch 用 MG90：22.8 × 12.2 × 28.5 mm（W × T × H），
+    #: 头部 pitch/yaw 用 MG90：22.8 × 12.2 × 28.5 mm（W × T × H），
     #: 输出轴沿 H（28.5），旋转轴近似取 22.8 × 12.2 端面的中心。
     head_motor_size: Vec3 = (0.0228, 0.0122, 0.0285)  # MG90: W, T, H
+    #: 颈部两段之间的立柱长度：``neck`` body（pitch 段）到 ``head`` body（yaw 段）的距离，
+    #: 也就是两根 MG90 的关节沿轴向的间距；立柱本身是 ``neck`` body 上的真实几何。
+    neck_joint_offset: float = 0.020
     # 安装板：轴向 13 mm 厚，端面 20 × 34（x/y/z 里哪个是轴向见注释）
     hip_pitch_size: Vec3 = (0.020, 0.013, 0.034)  # x=W, y=板厚(轴向), z=H
     hip_roll_size: Vec3 = (0.013, 0.020, 0.034)  # x=板厚(轴向), y=W, z=H
@@ -322,6 +332,11 @@ class DinoSpec:
         return (x, 0.0, z)
 
     @property
+    def neck_geom_size(self) -> Vec3:
+        """颈段立柱的全尺寸：截面取 ``neck_size`` 的 x/y，高度 = ``neck_joint_offset``。"""
+        return (self.neck_size[0], self.neck_size[1], self.neck_joint_offset)
+
+    @property
     def foot_mount_pitch(self) -> float:
         """足部相对小腿的**固定安装俯仰角**（不是关节）：站姿下让足底水平。
 
@@ -367,14 +382,9 @@ class DinoSpec:
         head_w += gap
         head_t += gap
         head_h += gap
-        # 头部两台 MG90 都以颈关节为中心对称摆（pitch 的 22.8×12.2 端面正对关节轴，
-        # 包络沿 y 居中；yaw 的机体在正下方）。yaw 挂在 head 上、会跟着 stand_neck
-        # 一起低头，所以按倾斜后的 z 半高算下沉量，保证它的顶面落在 pitch 底面之下。
-        tilt = abs(math.sin(self.stand_neck))
-        yaw_half_z = tilt * head_w / 2 + math.cos(self.stand_neck) * head_h / 2
-        neck_yaw_drop = (yaw_half_z + head_t / 2 + self.hip_motor_clearance) / math.cos(
-            self.stand_neck
-        )
+        # 头部两台 MG90 以颈关节为中心对称摆（pitch 的 22.8×12.2 端面正对关节轴，
+        # 包络沿 y 居中）；yaw 关节在 head body 原点（已经比 pitch 高
+        # ``neck_joint_offset``），它的机体就从这个原点继续往上伸。
         result: list[tuple[str, str, Vec3, Vec3]] = [
             (
                 "motor_neck_pitch",
@@ -386,7 +396,7 @@ class DinoSpec:
                 "motor_neck_yaw",
                 "head",
                 (head_w, head_t, head_h),  # MG90：轴沿 z；22.8×12.2 端面在 x-y 平面
-                (0.0, 0.0, -neck_yaw_drop),
+                (0.0, 0.0, head_h / 2),
             ),
         ]
         for side in ("L", "R"):
@@ -481,14 +491,15 @@ class DinoSpec:
 
     @property
     def n_bodies(self) -> int:
-        """躯干 1 + 头 1 + 臂 2 + 每腿 6（髋 3 块 + 大腿 + 小腿 + 足）×2 + 尾 4。"""
-        return 1 + 1 + 2 + 2 * 6 + 4
+        """躯干 1 + 颈 pitch 段 1 + 头 1 + 臂 2 + 每腿 6 ×2 + 尾 4。"""
+        return 1 + 1 + 1 + 2 + 2 * 6 + 4
 
     @property
     def body_geoms(self) -> tuple[tuple[str, Vec3, float], ...]:
         """全部物理几何的 (名称, 全尺寸, 密度)，用于质量估算与校验。"""
         geoms: list[tuple[str, Vec3, float]] = [
             ("torso", self.torso_size, self.density),
+            ("neck", self.neck_geom_size, self.density),
             ("head", self.head_size, self.density),
             ("arm", self.arm_size, self.density),
             ("arm", self.arm_size, self.density),
@@ -731,9 +742,10 @@ def stand_qpos(spec: DinoSpec) -> list[float]:
 def head_top_z(spec: DinoSpec) -> float:
     """标称站姿下头顶（最高点）离地高度。"""
     rot = _rot_pitch(spec.stand_neck)
-    center = np.asarray(spec.neck_pos, dtype=float) + rot @ np.asarray(
-        spec.head_offset, dtype=float
+    offset = np.asarray(spec.head_offset, dtype=float) + np.array(
+        (0.0, 0.0, spec.neck_joint_offset)
     )
+    center = np.asarray(spec.neck_pos, dtype=float) + rot @ offset
     corners = _corners(center, spec.head_size, rot)
     world = corners @ _rot_pitch(spec.base_pitch).T
     return solve_base_z(spec) + float(world[:, 2].max())
@@ -771,12 +783,14 @@ def _geom_attributes(
 
 
 def _joint_attributes(
-    joint: JointSpec, side: str | None, spec: DinoSpec
+    joint: JointSpec, side: str | None, spec: DinoSpec, anchor: Vec3 = (0.0, 0.0, 0.0)
 ) -> dict[str, str]:
     """一个 hinge 的属性表。
 
     关节坐标的零位是**标称站姿**（站姿角烘在 body 的 ``quat`` 里），所以这里的
     ``range``（本来写的是物理角）要减去该关节的站姿角，换算到"相对站姿"的坐标。
+    ``anchor`` 是关节在 body 坐标系里的锚点（默认 body 原点）；沿自身轴平移不改变
+    转轴所在直线，只影响关节“挂”在哪、以及电机往哪边伸。
     """
     name = joint_name(joint, side)
     stand = spec.stand_q()[name]
@@ -790,7 +804,7 @@ def _joint_attributes(
         "armature": fnum(joint.armature),
         "damping": fnum(joint.damping),
         "frictionloss": fnum(joint.frictionloss),
-        "pos": vec((0.0, 0.0, 0.0)),
+        "pos": vec(anchor),
     }
 
 
@@ -834,12 +848,17 @@ def _cap_attributes(joint: JointSpec, side: str | None) -> dict[str, str] | None
 
 
 def _add_joint(
-    body: ET.Element, joint: JointSpec, side: str | None, spec: DinoSpec
+    body: ET.Element,
+    joint: JointSpec,
+    side: str | None,
+    spec: DinoSpec,
+    anchor: Vec3 = (0.0, 0.0, 0.0),
 ) -> None:
-    """在 body 原点挂一个铰链，再加上它的灰色轴承外壳（如果有）。"""
-    ET.SubElement(body, "joint", _joint_attributes(joint, side, spec))
+    """在 body 的 ``anchor`` 处挂一个铰链，再加上它的灰色轴承外壳（如果有）。"""
+    ET.SubElement(body, "joint", _joint_attributes(joint, side, spec, anchor))
     cap = _cap_attributes(joint, side)
     if cap is not None:
+        cap["pos"] = vec(anchor)
         ET.SubElement(body, "geom", cap)
 
 
@@ -1085,20 +1104,39 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
         ),
     )
 
-    # ---- 头：颈 pitch → 颈 yaw，头几何再向前上方偏一段 ----
-    head = ET.SubElement(
+    # ---- 颈：pitch 段（含 20 mm 立柱）→ 头（yaw 段）----
+    neck = ET.SubElement(
         torso,
         "body",
         {
-            "name": "head",
+            "name": "neck",
             "pos": vec(spec.neck_pos),
-            "quat": _body_quat(
-                (spec.neck.axis, spec.stand_neck),
-                (spec.neck_yaw.axis, spec.stand_neck_yaw),
-            ),
+            "quat": _body_quat((spec.neck.axis, spec.stand_neck)),
         },
     )
-    _add_joint(head, spec.neck, None, spec)
+    _add_joint(neck, spec.neck, None, spec)
+    # 两个颈关节之间那根 20 mm 的立柱：真实连杆，不是虚拟 frame
+    ET.SubElement(
+        neck,
+        "geom",
+        _geom_attributes(
+            "neck_geom",
+            spec.neck_geom_size,
+            (0.0, 0.0, spec.neck_joint_offset / 2.0),
+            spec,
+            _GREY,
+            contype=2,
+            conaffinity=1,
+        ),
+    )
+    head = ET.SubElement(
+        neck,
+        "body",
+        {
+            "name": "head",
+            "pos": vec((0.0, 0.0, spec.neck_joint_offset)),
+        },
+    )
     _add_joint(head, spec.neck_yaw, None, spec)
     ET.SubElement(
         head,

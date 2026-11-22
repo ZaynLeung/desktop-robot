@@ -1,14 +1,19 @@
 """从 ``desktop_robot.dino`` 的参数源直接导出 CAD 占位装配。
 
 产物：
-* ``desktop_dino_cad.step``：可直接导入 SolidWorks 的 STEP 装配体
+* ``desktop_dino_cad.step``：整包 STEP（含彩色关节辅助轴 ref_*，用于查看/量尺寸）
+* ``assembly.step``：**扁平装配体**，一根连杆一个 component、位置就是站姿世界位姿，
+  不含任何 ref_* 辅助轴（SolidWorks 打开→保存全部，即可得到原生 .SLDASM + .SLDPRT）
+* ``parts/<link>.step``：**每根连杆一个单件**（多实体），局部坐标、原点在各自关节，
+  用于在 SolidWorks 里单独编辑后替换
 * ``desktop_dino_parts.csv``：零件/几何清单，便于核对尺寸
 * ``desktop_dino_assembly.json``：装配树、关节轴与相对位姿
 
 说明：
 * 源模型参数单位是米；CAD/STEP 默认导出成毫米，便于机械设计。
-* STEP 对“真正的坐标系/基准轴”支持并不统一，这里用可见的辅助轴几何代替，
-  导入 SolidWorks 后可以直接参考这些彩色占位轴继续细化结构。
+* STEP 对「真正的坐标系/基准轴」支持并不统一，``desktop_dino_cad.step`` 里用可见的
+  辅助轴几何代替；``assembly.step`` / ``parts/`` 这两种“可编辑”产物则刻意不带辅助轴，
+  避免 SolidWorks 把 90 个 ref_* 也变成零件。
 """
 
 from __future__ import annotations
@@ -398,6 +403,69 @@ def _build_body_assembly(
     return body_assy, body_json
 
 
+def _body_compound(
+    body_elem: ET.Element,
+) -> tuple[cq.Compound, tuple[float, float, float, float]]:
+    """把一个 body 的所有 geom 合成「单件」（body 局部坐标），供 ``parts/<link>.step``。
+
+    返回 ``(复合体, 主色)``；主色取第一个有质量的 geom（电机包络是零密度，会被跳过）。
+    """
+    body_name = body_elem.get("name", "unnamed_body")
+    shapes: list[cq.Shape] = []
+    color: tuple[float, float, float, float] = (0.30, 0.55, 0.25, 1.0)
+    for geom_elem in body_elem.findall("geom"):
+        record = _extract_geom_record(body_name, geom_elem)
+        shape = _make_geom_shape(record.geom_type, record.size_m)
+        shapes.append(
+            shape.moved(_loc_from_pos_quat(record.local_pos_m, record.local_quat_wxyz))
+        )
+        if record.density > 0.0:
+            color = record.rgba
+    if not shapes:
+        return cq.Compound.makeCompound([]), color
+    return cq.Compound.makeCompound(shapes), color
+
+
+def _collect_world_bodies(
+    body_elem: ET.Element,
+    parent_loc: cq.Location,
+    out: list[tuple[ET.Element, cq.Location]],
+) -> None:
+    """深度优先收集 ``(body, 世界位置)``：把每级的 pos/quat 累乘到父坐标系上。"""
+    local = _loc_from_pos_quat(
+        _parse_vec(body_elem.get("pos"), default=(0.0, 0.0, 0.0)),
+        _parse_vec(body_elem.get("quat"), default=(1.0, 0.0, 0.0, 0.0)),
+    )
+    world = parent_loc * local
+    out.append((body_elem, world))
+    for child in body_elem.findall("body"):
+        _collect_world_bodies(child, world, out)
+
+
+def _write_split_outputs(
+    root_body: ET.Element, out_dir: Path, spec_name: str
+) -> tuple[Path, Path, int]:
+    """写「一杆一个零件」的 ``parts/<link>.step`` 和已装配就位的 ``assembly.step``。
+
+    每个 body 一个复合实体（不再拆成 geom 级），装配体是**扁平**的：一个连杆一个
+    component、位置就是整机站姿下的世界位姿——SolidWorks 打开后零件就在正确位置，
+    保存一次即得原生 .SLDASM + 可编辑 .SLDPRT。不带任何 ``ref_*`` 辅助轴。
+    """
+    parts_dir = out_dir / "parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    assembly = cq.Assembly(name=f"{spec_name}_assembly")
+    bodies: list[tuple[ET.Element, cq.Location]] = []
+    _collect_world_bodies(root_body, cq.Location(), bodies)
+    for body_elem, world in bodies:
+        name = body_elem.get("name", "unnamed_body")
+        compound, color = _body_compound(body_elem)
+        cq.exporters.export(compound, str(parts_dir / f"{name}.step"))
+        assembly.add(compound, name=name, loc=world, color=_cad_color(color))
+    assembly_path = out_dir / "assembly.step"
+    assembly.save(str(assembly_path), exportType="STEP", mode="default")
+    return assembly_path, parts_dir, len(bodies)
+
+
 def _write_parts_csv(path: Path, records: list[GeomRecord]) -> None:
     rows = [_geom_record_to_csv_row(record) for record in records]
     fieldnames = [
@@ -474,9 +542,15 @@ def main() -> int:
     _write_parts_csv(parts_csv_path, geom_rows)
     _write_assembly_json(assembly_json_path, DEFAULT_DINO_SPEC.name, torso_json)
 
+    assembly_path, parts_dir, body_count = _write_split_outputs(
+        torso, out_dir, DEFAULT_DINO_SPEC.name
+    )
+
     print(f"STEP : {step_path}")
     print(f"PARTS: {parts_csv_path}")
     print(f"TREE : {assembly_json_path}")
+    print(f"ASM  : {assembly_path}  (扁平装配，{body_count} 个连杆组件)")
+    print(f"LINKS: {parts_dir}\\*.step  ({body_count} 个单件，原点=各自关节)")
     return 0
 
 

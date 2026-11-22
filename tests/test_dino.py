@@ -6,15 +6,18 @@ from dataclasses import replace
 import math
 import xml.etree.ElementTree as ET
 
+import numpy as np
 import pytest
 
-from desktop_robot.builder import MODELS_DIR, vec
+from desktop_robot.builder import MODELS_DIR, half, vec
 from desktop_robot.config import joint_name
 from desktop_robot.dino import (
+    _CAPS,
     DEFAULT_DINO_ENV_SPEC,
     DEFAULT_DINO_SPEC,
     DinoEnvSpec,
     head_top_z,
+    leg_boxes,
     render_dino_scene_xml,
     render_dino_xml,
     sole_lowest_z,
@@ -44,7 +47,7 @@ EXPECTED_JOINTS = [
     "tail4_pitch",
 ]
 
-#: 期望的轴：俯仰 (0,-1,0)；偏航 (0,0,1)；内外翻 x 镜像、脚尖偏航 z 镜像。
+#: 期望的轴：俯仰 (0,-1,0)；偏航 (0,0,1)；内外翻 x 镜像（髋 roll 与踝）、脚尖偏航 z 镜像。
 EXPECTED_AXES = {
     "neck_pitch": (0.0, -1.0, 0.0),
     "neck_yaw": (0.0, 0.0, 1.0),
@@ -58,8 +61,8 @@ EXPECTED_AXES = {
     "hip_yaw_R": (0.0, 0.0, -1.0),
     "knee_L": (0.0, -1.0, 0.0),
     "knee_R": (0.0, -1.0, 0.0),
-    "ankle_L": (0.0, -1.0, 0.0),
-    "ankle_R": (0.0, -1.0, 0.0),
+    "ankle_L": (1.0, 0.0, 0.0),
+    "ankle_R": (-1.0, 0.0, 0.0),
     "tail1_yaw": (0.0, 0.0, 1.0),
     "tail2_pitch": (0.0, -1.0, 0.0),
     "tail3_yaw": (0.0, 0.0, 1.0),
@@ -72,7 +75,7 @@ def test_dof_counts():
     assert spec.nq == 25  # 7 自由基座 + 18 个驱动关节
     assert spec.nv == 24
     assert spec.nu == 18
-    assert spec.n_bodies == 14  # 每条腿的 3 个关节都挂在 thigh body 上，不新增 body
+    assert spec.n_bodies == 20  # 每腿 6 个 body：三段髋块 + 大腿 + 小腿 + 足
     assert len(spec.joint_names) == 18
 
 
@@ -110,13 +113,17 @@ def test_stand_pose_is_plausible():
     spec = DEFAULT_DINO_SPEC
     height = head_top_z(spec)
     assert solve_base_z(spec) > 0.1
-    assert 0.25 < height < 0.45
+    assert 0.15 < height < 0.45
     assert height > solve_base_z(spec)  # 头顶一定在基座之上
 
 
-def test_mass_is_plausible_for_a_desktop_robot():
-    mass = DEFAULT_DINO_SPEC.total_mass()
-    assert 0.5 < mass < 6.0, f"总质量 {mass:.3f} kg 不像桌面机器人"
+def test_mass_is_modelled_volume_times_material_density():
+    """质量 = 建模体积 × 材料密度（只算塑料件，不摊舵机 / 电池）。"""
+    spec = DEFAULT_DINO_SPEC
+    volume = sum(size[0] * size[1] * size[2] for _, size, _ in spec.body_geoms)
+    assert spec.total_mass() == pytest.approx(volume * spec.density)
+    assert 0.5 < spec.total_mass() < 20.0, f"总质量 {spec.total_mass():.3f} kg 不合理"
+    assert spec.density == 1240.0  # PLA
 
 
 def test_rendered_structure():
@@ -173,6 +180,128 @@ def test_tail_chain_nesting():
         parent = child
 
 
+def test_hip_three_joints_have_their_own_cuboid_links():
+    """髋部三个关节各挂一个 body、各一块长方体连杆，按 pitch → roll → yaw 串联。"""
+    spec = DEFAULT_DINO_SPEC
+    root = ET.fromstring(render_dino_xml(spec))
+    for side in ("L", "R"):
+        pitch = root.find(f".//body[@name='hip_pitch_{side}']")
+        assert pitch is not None
+        roll = pitch.find(f"body[@name='hip_roll_{side}']")
+        assert roll is not None, "内外翻块不是主髋块的子 body"
+        yaw = roll.find(f"body[@name='hip_yaw_{side}']")
+        assert yaw is not None, "偏航块不是内外翻块的子 body"
+        thigh = yaw.find(f"body[@name='thigh_{side}']")
+        assert thigh is not None, "大腿不是偏航块的子 body"
+
+        for body, joint_name_, block_name, size in (
+            (pitch, "hip_pitch", "hip_pitch_block", spec.hip_pitch_size),
+            (roll, "hip_roll", "hip_roll_block", spec.hip_roll_size),
+            (yaw, "hip_yaw", "hip_yaw_block", spec.hip_yaw_size),
+        ):
+            assert [j.get("name") for j in body.findall("joint")] == [
+                f"{joint_name_}_{side}"
+            ]
+            block = body.find(f"geom[@name='{block_name}_{side}']")
+            assert block is not None, f"{block_name}_{side} 缺失"
+            assert block.get("type") == "box"
+            assert block.get("size") == vec(half(size))
+
+
+def test_hip_block_sizes_and_offsets_are_adjustable():
+    """改髋块尺寸 / 偏距后，geom 尺寸与下游 body 位置都必须自动跟着变。"""
+    spec = replace(
+        DEFAULT_DINO_SPEC,
+        hip_pitch_size=(0.060, 0.020, 0.060),
+        hip_roll_size=(0.020, 0.050, 0.050),
+        hip_yaw_size=(0.050, 0.046, 0.020),
+        hip_roll_offset=(0.0, 0.020, 0.0),
+        hip_yaw_offset=(0.020, 0.0, 0.0),
+        thigh_offset=(0.0, 0.0, -0.020),
+    )
+    root = ET.fromstring(render_dino_xml(spec))
+    assert root.find(".//geom[@name='hip_pitch_block_L']").get("size") == vec(
+        half((0.060, 0.020, 0.060))
+    )
+    pitch_l = root.find(".//body[@name='hip_pitch_L']")
+    roll_l = pitch_l.find("body[@name='hip_roll_L']")
+    assert roll_l.get("pos") == "0 0.02 0"
+    yaw_l = roll_l.find("body[@name='hip_yaw_L']")
+    assert yaw_l.get("pos") == "0.02 0 0"
+    assert yaw_l.find("body[@name='thigh_L']").get("pos") == "0 0 -0.02"
+    # 右腿 y 镜像、x/z 相同
+    roll_r = root.find(".//body[@name='hip_pitch_R']").find("body[@name='hip_roll_R']")
+    assert roll_r.get("pos") == "0 -0.02 0"
+
+
+def test_hip_mount_plates_cover_the_xc330_and_leave_room_for_the_body():
+    """安装板端面覆盖 XC330 的 20×34 安装面；电机体 26 mm 缩进上一级连杆。"""
+    spec = DEFAULT_DINO_SPEC
+    w, h, d = spec.hip_motor_size
+    assert (w, h, d) == (0.020, 0.034, 0.026)
+    for name, axis, size, offset in spec.hip_blocks():
+        axial = size[axis]
+        face = sorted(value for index, value in enumerate(size) if index != axis)
+        assert face[0] >= w - 1e-9, f"{name} 安装板盖不住电机端面"
+        assert face[1] >= h - 1e-9, f"{name} 安装板盖不住电机端面"
+        assert 0.005 <= axial <= 0.020, f"{name} 安装板厚度 {axial:.3f} 不合常理"
+        # 板贴在关节上、沿偏距伸出一半板厚，所以板厚不能超过偏距
+        assert axial <= math.dist(offset, (0.0, 0.0, 0.0)) + 1e-9
+
+    # 电机体往「上一级连杆」里缩 26 mm：pitch 要能进躯干、yaw 要能进大腿
+    assert spec.hip_pos[1] - d > -spec.torso_size[1] / 2.0
+    assert abs(spec.thigh_offset[2]) + spec.thigh_size[2] >= d
+
+
+def test_joint_motors_are_all_modelled_and_unique():
+    """5 个「不可互相嵌入」的关节都要有电机包络（3 髋 + 2 颈），尺寸 = 电机 + 间隙。"""
+    spec = DEFAULT_DINO_SPEC
+    motors = spec.joint_motors()
+    names = {name for name, _, _, _ in motors}
+    assert names == {
+        "motor_neck_pitch",
+        "motor_neck_yaw",
+        "motor_hip_pitch_L",
+        "motor_hip_roll_L",
+        "motor_hip_yaw_L",
+        "motor_hip_pitch_R",
+        "motor_hip_roll_R",
+        "motor_hip_yaw_R",
+    }
+    gap = 2 * spec.hip_motor_clearance
+    xc330 = sorted(value + gap for value in spec.hip_motor_size)  # (W, H, D) + 间隙
+    mg90 = sorted(value + gap for value in spec.head_motor_size)  # (W, T, H) + 间隙
+    for name, _, size, _ in motors:
+        expected = mg90 if name.startswith("motor_neck_") else xc330
+        assert sorted(size) == sorted(expected), name
+
+
+def test_ankle_is_roll_and_the_foot_is_pitch_mounted():
+    """踝是内外翻（轴 ±x），足底水平由 foot_mount_pitch 这个安装角保证。"""
+    spec = DEFAULT_DINO_SPEC
+    assert spec.ankle.axis_for("L") == (1.0, 0.0, 0.0)
+    assert spec.ankle.axis_for("R") == (-1.0, 0.0, 0.0)
+    assert spec.stand_ankle == 0.0
+    assert spec.foot_mount_pitch == pytest.approx(
+        -(spec.base_pitch + spec.stand_hip + spec.stand_knee)
+    )
+
+    # 站姿下足 box 的世界旋转应当是单位阵（足底与地面平行）
+    base_pitch = spec.base_pitch
+    c, s = math.cos(base_pitch), math.sin(base_pitch)
+    rot_base = np.array([[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]])
+    for side in ("L", "R"):
+        _, _, foot_rot = leg_boxes(spec, side, spec.stand_hip, spec.stand_knee)[0]
+        assert np.allclose(rot_base @ foot_rot, np.eye(3), atol=1e-12)
+
+    # XML 里踝轴是 ±x，range 不再被站姿角平移
+    root = ET.fromstring(render_dino_xml(spec))
+    for side, axis in (("L", "1 0 0"), ("R", "-1 0 0")):
+        joint = root.find(f".//joint[@name='ankle_{side}']")
+        assert joint.get("axis") == axis
+        assert joint.get("range") == "-0.35 0.35"
+
+
 def test_every_joint_has_a_bearing_cap():
     root = ET.fromstring(render_dino_xml(DEFAULT_DINO_SPEC))
     cap_names = {
@@ -180,7 +309,13 @@ def test_every_joint_has_a_bearing_cap():
         for g in root.findall(".//geom")
         if (g.get("name") or "").startswith("cap_")
     }
-    assert cap_names == {f"cap_{name}" for name in DEFAULT_DINO_SPEC.joint_names}
+    # 髋部三个关节用长方体连杆代替灰圆柱，不再有 cap_*
+    expected = {
+        f"cap_{joint_name(joint, side)}"
+        for joint, side in DEFAULT_DINO_SPEC.actuated()
+        if joint.name in _CAPS
+    }
+    assert cap_names == expected
 
 
 def test_scene_has_include_ground_and_cameras():

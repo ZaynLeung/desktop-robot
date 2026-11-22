@@ -45,6 +45,97 @@ def _body_pos(model, data, name: str) -> np.ndarray:
     return data.xpos[body_id].copy()
 
 
+def _obb(model, data, gid):
+    """geom 的 OBB：``(中心, 3×3 旋转, 半尺寸)``。"""
+    return (
+        np.asarray(data.geom_xpos[gid], dtype=float),
+        np.asarray(data.geom_xmat[gid], dtype=float).reshape(3, 3),
+        np.asarray(model.geom_size[gid], dtype=float),
+    )
+
+
+def _obb_intersect(a, b) -> bool:
+    """分离轴定理：两个 OBB 是否相交。"""
+    pos_a, rot_a, half_a = a
+    pos_b, rot_b, half_b = b
+    axes = [rot_a[:, i] for i in range(3)] + [rot_b[:, i] for i in range(3)]
+    for i in range(3):
+        for j in range(3):
+            axis = np.cross(rot_a[:, i], rot_b[:, j])
+            norm = np.linalg.norm(axis)
+            if norm > 1e-9:
+                axes.append(axis / norm)
+    delta = pos_b - pos_a
+    for axis in axes:
+        distance = abs(float(np.dot(delta, axis)))
+        radius_a = sum(half_a[i] * abs(float(np.dot(axis, rot_a[:, i]))) for i in range(3))
+        radius_b = sum(half_b[i] * abs(float(np.dot(axis, rot_b[:, i]))) for i in range(3))
+        if distance > radius_a + radius_b + 1e-9:
+            return False
+    return True
+
+
+def _geom_id(model, name: str) -> int:
+    gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+    assert gid >= 0, f"模型里缺少 geom {name}"
+    return gid
+
+
+def test_stand_pose_has_enough_static_stability_margin(scene_model):
+    """站姿下质心投影要离支撑面边缘有余量（脚跟加长后后向 ≥ 25 mm）。"""
+    data = _fresh_data(scene_model)
+    points = []
+    for gid in range(scene_model.ngeom):
+        name = mujoco.mj_id2name(scene_model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+        if not name.startswith(("foot_geom_", "toe_geom_")):
+            continue
+        corners = _box_corners(
+            data.geom_xpos[gid],
+            data.geom_xmat[gid].reshape(3, 3),
+            scene_model.geom_size[gid],
+        )
+        lowest = corners[:, 2].min()
+        points.append(corners[np.abs(corners[:, 2] - lowest) < 1e-6])
+    contact = np.vstack(points)
+    com = data.subtree_com[0]
+    rear = com[0] - contact[:, 0].min()
+    front = contact[:, 0].max() - com[0]
+    assert rear > 0.025, f"后向余量只有 {rear * 1000:.1f} mm"
+    assert front > 0.04, f"前向余量只有 {front * 1000:.1f} mm"
+
+
+def test_joint_volumes_do_not_intersect(scene_model):
+    """关节可以缩进连杆，但**关节之间不能互相嵌入**。
+
+    这里把 8 个电机包络（髋 3×2 + 颈 2）和 6 块髋安装板都当成刚体，
+    两两做 OBB 相交检查（SAT）；任何一对相交都会让真机装不起来。
+    """
+    data = _fresh_data(scene_model)
+    motors = ["motor_neck_pitch", "motor_neck_yaw"] + [
+        f"motor_hip_{joint}_{side}"
+        for side in ("L", "R")
+        for joint in ("pitch", "roll", "yaw")
+    ]
+    boxes = [_obb(scene_model, data, _geom_id(scene_model, name)) for name in motors]
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            assert not _obb_intersect(boxes[i], boxes[j]), (
+                f"{motors[i]} 与 {motors[j]} 相交"
+            )
+
+    plates = [
+        f"hip_{joint}_block_{side}"
+        for side in ("L", "R")
+        for joint in ("pitch", "roll", "yaw")
+    ]
+    plate_boxes = [_obb(scene_model, data, _geom_id(scene_model, name)) for name in plates]
+    for i in range(len(plate_boxes)):
+        for j in range(i + 1, len(plate_boxes)):
+            assert not _obb_intersect(plate_boxes[i], plate_boxes[j]), (
+                f"{plates[i]} 与 {plates[j]} 相交"
+            )
+
+
 @pytest.fixture(scope="module")
 def scene_model():
     return mujoco.MjModel.from_xml_path(str(MODELS_DIR / "dino_scene.xml"))
@@ -175,6 +266,34 @@ def test_hip_yaw_turns_the_toes_outward_on_both_sides(scene_model):
         # 前趾离踝关节有 x 偏移，所以脚尖也会向该侧明显平移
         toe_after = data.geom_xpos[toe_id]
         assert sign * (toe_after[1] - toe_before[1]) > 0.005
+
+
+def test_ankle_roll_tilts_the_foot_sideways(scene_model):
+    """踝是 roll：正角让脚掌绕前后轴侧倾，脚掌的俯仰（前向轴）保持不变。"""
+    angle = 0.35
+    for side, sign in (("L", 1.0), ("R", -1.0)):
+        data = _fresh_data(scene_model)
+        foot_id = mujoco.mj_name2id(
+            scene_model, mujoco.mjtObj.mjOBJ_BODY, f"foot_{side}"
+        )
+        toe_id = mujoco.mj_name2id(
+            scene_model, mujoco.mjtObj.mjOBJ_GEOM, f"toe_geom_{side}1"
+        )
+        before = data.xmat[foot_id].reshape(3, 3).copy()
+        toe_before = data.geom_xpos[toe_id].copy()
+        # 站姿下足底水平：前向轴 x 与横向轴 y 都基本水平
+        assert abs(before[2, 0]) < 0.02
+        assert abs(before[2, 1]) < 0.02
+
+        _set_joint(scene_model, data, f"ankle_{side}", angle)
+        after = data.xmat[foot_id].reshape(3, 3)
+        # 绕脚掌自身的前后轴（x）转：x 轴不动 → 俯仰角不变，不是 pitch
+        assert np.allclose(after[:, 0], before[:, 0], atol=1e-9)
+        # 横向轴 y 在 y-z 平面里倒，倾角就是给定角度（左右镜像）
+        assert sign * after[2, 1] == pytest.approx(np.sin(angle), abs=1e-6)
+        # 前趾有 ±y 偏移，侧倾后高度会一升一降
+        toe_dz = data.geom_xpos[toe_id][2] - toe_before[2]
+        assert sign * toe_dz < -0.002, f"{side} 侧踝正角没有把脚掌侧倾"
 
 
 def test_new_tail_yaw_swings_the_tail_sideways(scene_model):

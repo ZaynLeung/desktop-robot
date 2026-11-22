@@ -50,7 +50,7 @@ def test_head_camera_is_bound_to_head(loaded):
 
 def test_stand_keyframe(loaded):
     _, layout = loaded
-    assert layout.stand_base_z == pytest.approx(0.184144, abs=1e-4)
+    assert layout.stand_base_z == pytest.approx(0.151695, abs=1e-4)
     assert np.allclose(layout.stand_qpos[7:], 0.0)
 
 

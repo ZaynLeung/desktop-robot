@@ -4,27 +4,34 @@
 :class:`DinoEnvSpec` / :data:`DEFAULT_DINO_ENV_SPEC`，模型文件
 ``models/dino.xml`` 与 ``models/dino_scene.xml`` 是它们的确定性生成物。
 
-拓扑（18 个驱动关节：俯仰 pitch 11 / 偏航 yaw 5 / 内外翻 roll 2）：::
+拓扑（18 个驱动关节：俯仰 pitch 9 / 偏航 yaw 5 / 内外翻 roll 4）：::
 
     torso（浮动基座，freejoint: root）
     ├─ head          neck_pitch ①（上下） → neck_yaw ②（左右，轴 z）
     │                └─ 相机 cam_head（头部前视相机，随头一起转）
     ├─ arm_L         shoulder_pitch_L ③（上下）
     ├─ arm_R         shoulder_pitch_R ④（上下）
-    ├─ thigh_L       hip_pitch_L ⑤（主髋，上下） → hip_roll_L ⑥（内外翻，轴 x）
-    │  │                                        → hip_yaw_L ⑦（脚尖外旋，轴 z）
-    │  └─ shank_L    knee_L ⑧
-    │     └─ foot_L  ankle_L ⑨
-    ├─ thigh_R       hip_pitch_R ⑩ → hip_roll_R ⑪ → hip_yaw_R ⑫
+    ├─ hip_pitch_L   ⑤（主髋块，轴 y，上下）
+    │  └─ hip_roll_L  ⑥（内外翻块，轴 x）
+    │     └─ hip_yaw_L  ⑦（脚尖偏航块，轴 z）
+    │        └─ thigh_L    （无关节大腿块）
+    │           └─ shank_L  knee_L ⑧
+    │              └─ foot_L  ankle_L ⑨（内外翻，轴 x）
+    ├─ hip_pitch_R ⑩ → hip_roll_R ⑪ → hip_yaw_R ⑫ → thigh_R
     │  └─ shank_R    knee_R ⑬
-    │     └─ foot_R  ankle_R ⑭
+    │     └─ foot_R  ankle_R ⑭（内外翻）
     └─ tail_1        tail1_yaw ⑮（侧向，轴 z）
        └─ tail_2     tail2_pitch ⑯（上下）
           └─ tail_3  tail3_yaw ⑰（侧向，轴 z）
              └─ tail_4 tail4_pitch ⑱（上下）
 
 每条腿都是 5 个关节：主髋 pitch → 内外翻 roll → 脚尖 yaw → 膝 → 踝。
-「脚尖 yaw」是本版相对参考图新增的自由度，用来让脚掌相对腿转向。
+髋部的三个关节**各自挂在一块长方体安装板上**（三段串联、尺寸与偏距都可调），
+每块板 14 mm 厚、端面按 **ROBOTIS XC330-T181-T** 的 20 × 34 mm 安装面开，
+**电机体（轴向 26 mm）缩进上一级连杆**：pitch 缩进躯干、roll 缩进 pitch 板、
+yaw 缩进大腿。这样三段电机能真的放下，髋部也不会被三台电机叠成 160 mm 宽。
+「脚尖 yaw」让脚掌相对腿转向；踝是 **roll**（脚掌内外翻），不做俯仰——
+足底水平由 ``foot_mount_pitch`` 这个固定安装角保证，见下。
 
 **每个连杆的长度都由对应 ``*_size`` 的相应分量决定**，改长度后关节/几何偏移
 会自动跟着重算，不需要手工同步：
@@ -46,16 +53,23 @@
 
 * 俯仰（上下）：轴 ``(0, -1, 0)``，正角 = 子连杆向前摆；对朝后的尾巴，正角 = 尾尖下压。
 * 偏航（左右）：轴 ``(0, 0, 1)``，正角 = 从上往下看逆时针（头部向左、尾尖向右）。
-* 内外翻：左腿轴 ``(1, 0, 0)``、右腿轴 ``(-1, 0, 0)``，两腿正角都表示外翻。
+* 内外翻：左腿轴 ``(1, 0, 0)``、右腿轴 ``(-1, 0, 0)``，两腿正角都表示外翻
+  （髋 ``hip_roll`` 与踝 ``ankle`` 都是这一类）。
 * 脚尖偏航：左腿轴 ``(0, 0, 1)``、右腿轴 ``(0, 0, -1)``（``JointSpec.mirror_z`` 镜像），
   **两腿正角都表示脚尖外旋**（左脚尖转向 +y、右脚尖转向 −y），控制器同样不用翻号。
 
+**踝只有 roll，没有 pitch**：脚掌的俯仰不是关节，而是 ``foot_mount_pitch`` 这个
+固定安装角（不是驱动的自由度），它把足底在站姿下摆平。所以下蹲时足底不再自动
+保持水平，需要由 ``hip_pitch`` + ``knee`` 组合保证；这也是本版相对上一版的取舍。
+
 轴写在关节所在 body 的局部坐标系里，会随上游关节一起转；同一个 body 里多个关节
 按定义顺序复合，所以「髋 pitch → 内外翻 roll → 脚尖 yaw」「头 pitch → yaw」都按
-这副顺序生效。
+这副顺序生效。髋部三段是**串联的三个 body**，第二、三段的原点按各关节轴偏出一段
+（``hip_roll_offset`` / ``hip_yaw_offset`` / ``thigh_offset``），方向按左右镜像。
 
 模型的**零位就是标称站姿**：每个 body 的 ``quat`` 烘了它所有关节的站姿角
-（颈/肩/髋/膝/踝/尾），躯干 body 的 ``pos`` / ``quat`` 是站姿的基座高度与抬头角。
+（颈/肩/髋/膝/尾）与足部安装角，躯干 body 的 ``pos`` / ``quat`` 是站姿的基座
+高度与抬头角。
 于是 ``qpos`` 全 0 时模型正好是标称站姿、脚底落在 z=0：``dino.xml`` /
 ``dino_scene.xml`` 一加载就站在地面上，不依赖"先套 stand 关键帧"。``stand``
 关键帧仍然保留（关节角全 0、``ctrl`` 全 0），用于 ``mj_resetDataKeyframe`` 复位；
@@ -96,16 +110,13 @@ _GREEN = "0.30 0.55 0.25 1"
 _GREEN_LIMB = "0.24 0.47 0.20 1"
 _TOE = "0.12 0.12 0.13 1"
 _GREY = "0.55 0.56 0.58 1"
+_MOTOR = "0.20 0.22 0.25 1"  # 电机包络（只做视觉）
 
 #: 关节轴承外壳（只做视觉，不参与质量和碰撞）：关节基名 → (半径, 半长)。
 #: 参考图里每个铰链都有一圈灰色轴承，加上它渲染出来才像那台机器人。
+#: 髋部三个关节与颈部两个关节例外：它们各自画「电机包络」长方体，不再叠圆柱外壳。
 _CAPS: dict[str, tuple[float, float]] = {
-    "neck_pitch": (0.016, 0.024),
-    "neck_yaw": (0.014, 0.020),
     "shoulder_pitch": (0.014, 0.019),
-    "hip_pitch": (0.016, 0.024),
-    "hip_roll": (0.015, 0.022),
-    "hip_yaw": (0.015, 0.022),
     "knee": (0.014, 0.021),
     "ankle": (0.012, 0.017),
     "tail1_yaw": (0.012, 0.018),
@@ -149,42 +160,63 @@ class DinoSpec:
     name: str = "desktop_dino"
 
     # ---- 躯干：直接做浮动基座（图中没有腰关节）----
-    torso_size: Vec3 = (0.30, 0.095, 0.085)
+    torso_size: Vec3 = (0.210, 0.0665, 0.0595)
 
     # ---- 头：颈关节位置相对躯干中心；头几何中心相对颈关节 ----
-    head_size: Vec3 = (0.100, 0.072, 0.055)
-    neck_pos: Vec3 = (0.055, 0.0, 0.050)
-    head_offset: Vec3 = (0.032, 0.0, 0.022)
+    head_size: Vec3 = (0.070, 0.0504, 0.0385)
+    neck_pos: Vec3 = (0.0385, 0.0, 0.035)
+    head_offset: Vec3 = (0.0224, 0.0, 0.0154)
 
     # ---- 头部相机：挂在 head body 上，随颈/头一起转（第一人称观测用）----
     # pos 相对 head body 原点，贴在头部前方脸上；xyaxes = (相机 x 轴, 相机 y 轴)，
     # 相机沿 −z 看：x = (0,−1,0)（画面右方 = −y）、y = (sin12°, 0, cos12°)，
     # 于是视轴 = (cos12°, 0, −sin12°)，即朝 +x 前方、相对头部下俯 12°。
     # 站姿下头部净俯仰约 +5.7°，所以相机世界视线约下俯 6.3°，能看到更多前方地面。
-    head_camera_pos: Vec3 = (0.086, 0.0, 0.026)
+    head_camera_pos: Vec3 = (0.0602, 0.0, 0.0182)
     head_camera_xyaxes: str = "0 -1 0 0.2079 0 0.9781"
     head_camera_fovy: float = 75.0
 
     # ---- 臂：单段，无肘/手 ----
-    arm_size: Vec3 = (0.045, 0.032, 0.075)
-    shoulder_pos: Vec3 = (0.048, 0.058, 0.018)  # y 为左肩；右肩取反
+    arm_size: Vec3 = (0.0315, 0.0224, 0.0525)
+    shoulder_pos: Vec3 = (0.0336, 0.0406, 0.0126)  # y 为左肩；右肩取反
 
     # ---- 腿 ----
-    thigh_size: Vec3 = (0.048, 0.040, 0.050)
-    shank_size: Vec3 = (0.044, 0.036, 0.045)
-    foot_size: Vec3 = (0.085, 0.055, 0.032)
-    toe_size: Vec3 = (0.028, 0.018, 0.026)
-    hip_pos: Vec3 = (-0.085, 0.045, -0.030)
-    foot_center: Vec3 = (0.012, 0.0, -0.016)  # 足 box 中心相对踝关节
-    toe_y: float = 0.013  # 两个前趾中心相对足中线（旋转方向镜像 ±）
-    toe_overlap: float = 0.006  # 前趾与足 box 在 x 方向的重叠量
+    thigh_size: Vec3 = (0.0336, 0.0280, 0.0350)
+    shank_size: Vec3 = (0.0308, 0.0252, 0.0315)
+    # 足：脚跟比原设计长 14 mm（前缘/前趾位置不变，只往后延长），换取后向稳定余量。
+    foot_size: Vec3 = (0.0735, 0.0385, 0.0224)
+    toe_size: Vec3 = (0.0196, 0.0126, 0.0182)
+    hip_pos: Vec3 = (-0.0595, 0.0315, -0.0210)
+    foot_center: Vec3 = (0.0014, 0.0, -0.0112)  # 足 box 中心相对踝关节（脚跟后移后重心调回）
+    toe_y: float = 0.0091  # 两个前趾中心相对足中线（旋转方向镜像 ±）
+    toe_overlap: float = 0.0042  # 前趾与足 box 在 x 方向的重叠量
+
+    # ---- 髋部三段：电机缩进连杆、但电机之间互不干涉（全尺寸，米）----
+    # ROBOTIS XC330-T181-T 外形 W × H × D = 20.0 × 34.0 × 26.0 mm，
+    # **D（26 mm）沿输出轴**，端面（带 4×M2 孔与 Ø16 轮毂）是 20 × 34。
+    # 三台电机的机体分别缩进上一级连杆（pitch 进躯干、roll 进 pitch 板、yaw 进 roll 板），
+    # 各自沿**自己的轴**向后伸出 D；三段原点各让开 20 mm，并按下面的横截面朝向摆放，
+    # 于是三个电机包络两两不相交（见 tests 里的 SAT 断言）。hip_* 只是 10 mm 厚的安装板。
+    hip_motor_size: Vec3 = (0.020, 0.034, 0.026)  # XC330: W, H, D
+    hip_motor_clearance: float = 0.001  # 每侧装配间隙（打印件 1 mm）
+    #: 头部 pitch 用 MG90：22.8 × 12.2 × 28.5 mm（W × T × H），
+    #: 输出轴沿 H（28.5），旋转轴近似取 22.8 × 12.2 端面的中心。
+    head_motor_size: Vec3 = (0.0228, 0.0122, 0.0285)  # MG90: W, T, H
+    # 安装板：轴向 13 mm 厚，端面 20 × 34（x/y/z 里哪个是轴向见注释）
+    hip_pitch_size: Vec3 = (0.020, 0.013, 0.034)  # x=W, y=板厚(轴向), z=H
+    hip_roll_size: Vec3 = (0.013, 0.020, 0.034)  # x=板厚(轴向), y=W, z=H
+    hip_yaw_size: Vec3 = (0.020, 0.034, 0.013)  # x=W, y=H, z=板厚(轴向)
+    # 下一段 body 相对本关节原点的偏距，方向沿本关节的轴；右腿按 y 镜像（和 hip_pos 一样）。
+    hip_roll_offset: Vec3 = (0.0, 0.024, 0.0)  # 沿 pitch 轴向 +y（左腿外侧）
+    hip_yaw_offset: Vec3 = (0.024, 0.0, 0.0)  # 沿 roll 轴向前；右腿轴为 −x，即其负向
+    thigh_offset: Vec3 = (0.0, 0.0, -0.024)  # 沿 yaw 轴向下；右腿轴为 −z，即其正向
 
     # ---- 尾巴：4 节，长度/截面都在这里改 ----
-    tail1_size: Vec3 = (0.080, 0.070, 0.086)
-    tail2_size: Vec3 = (0.075, 0.065, 0.074)
-    tail3_size: Vec3 = (0.070, 0.061, 0.062)
-    tail4_size: Vec3 = (0.060, 0.056, 0.050)
-    tail1_pos: Vec3 = (-0.068, 0.0, -0.020)
+    tail1_size: Vec3 = (0.0560, 0.0490, 0.0602)
+    tail2_size: Vec3 = (0.0525, 0.0455, 0.0518)
+    tail3_size: Vec3 = (0.0490, 0.0427, 0.0434)
+    tail4_size: Vec3 = (0.0420, 0.0392, 0.0350)
+    tail1_pos: Vec3 = (-0.0476, 0.0, -0.0140)
 
     # ---- 关节 ----
     neck: JointSpec = field(default_factory=lambda: _joint("neck_pitch", (-0.70, 0.70)))
@@ -206,8 +238,11 @@ class DinoSpec:
         )
     )
     knee: JointSpec = field(default_factory=lambda: _joint("knee", (-1.60, 0.05)))
+    # 踝 = 脚掌内外翻（roll，左右镜像），不再做俯仰：足底水平靠 foot_mount_pitch。
     ankle: JointSpec = field(
-        default_factory=lambda: _joint("ankle", (-0.60, 0.80), forcerange=2.0)
+        default_factory=lambda: _joint(
+            "ankle", (-0.35, 0.35), axis=ROLL, mirror_x=True, forcerange=2.0
+        )
     )
     tail1_yaw: JointSpec = field(
         default_factory=lambda: _joint("tail1_yaw", (-0.50, 0.50), axis=YAW)
@@ -223,7 +258,7 @@ class DinoSpec:
     )
 
     # ---- 标称站姿（弧度）----
-    # 躯干抬头 base_pitch；踝角由「足底水平」判据反解，保证脚掌贴地。
+    # 躯干抬头 base_pitch；足底水平由 foot_mount_pitch（固定安装角）保证。
     # 新增的 yaw / roll 关节站姿角都是 0：零位即站姿的写法下它们不需要平移范围。
     base_pitch: float = math.radians(20.0)
     stand_neck: float = -0.25
@@ -239,7 +274,9 @@ class DinoSpec:
     stand_tail3_yaw: float = 0.0
     stand_tail4_pitch: float = -0.05
 
-    density: float = 400.0
+    #: 材料密度（kg/m³）：只按**塑料件**算，直接「建模体积 × 密度」，不摊舵机/电池/PCB。
+    #: 默认 PLA（3D 打印最常用，1.24 g/cm³）；ABS 1040、PETG 1270、尼龙 1140 可换。
+    density: float = 1240.0
 
     # ------------------------------------------------------------------
     # 长度（全部由尺寸分量派生，改尺寸后自动生效）
@@ -285,9 +322,115 @@ class DinoSpec:
         return (x, 0.0, z)
 
     @property
-    def stand_ankle(self) -> float:
-        """让足底保持水平（且与基座平行）的踝角。"""
+    def foot_mount_pitch(self) -> float:
+        """足部相对小腿的**固定安装俯仰角**（不是关节）：站姿下让足底水平。
+
+        踝改成 roll 以后，脚掌的俯仰只能靠这个安装角；它被烘进 ``foot`` body 的
+        ``quat``，所以在 qpos 全 0 的站姿下足底仍然贴地。
+        """
         return -(self.base_pitch + self.stand_hip + self.stand_knee)
+
+    @property
+    def stand_ankle(self) -> float:
+        """踝关节（roll）的站姿角：内外翻不预旋，所以是 0。"""
+        return 0.0
+
+    def hip_blocks(self) -> tuple[tuple[str, int, Vec3, Vec3], ...]:
+        """三段髋块：``(关节名, 轴向分量下标, 方块尺寸, 到下一段的偏距)``。
+
+        轴向下标说明尺寸的哪一分量沿该关节的轴（也就是电机输出轴）：
+        pitch 是 y、roll 是 x、yaw 是 z。
+        """
+        return (
+            ("hip_pitch", 1, self.hip_pitch_size, self.hip_roll_offset),
+            ("hip_roll", 0, self.hip_roll_size, self.hip_yaw_offset),
+            ("hip_yaw", 2, self.hip_yaw_size, self.thigh_offset),
+        )
+
+    @property
+    def motor_envelope(self) -> Vec3:
+        """电机 + 两侧装配间隙的包络 ``(W, H, D)``，``D`` 沿输出轴。"""
+        gap = 2.0 * self.hip_motor_clearance
+        w, h, d = self.hip_motor_size
+        return (w + gap, h + gap, d + gap)
+
+    def joint_motors(self) -> tuple[tuple[str, str, Vec3, Vec3], ...]:
+        """5 台电机包络：``(名称, 所属 body 键, 包络尺寸, 局部位置)``。
+
+        body 键：``torso`` / ``hip_pitch`` / ``hip_roll`` / ``head``（腿上的键再由
+        生成器加 ``_L``/``_R`` 后缀）。这些包络**两两不相交**（有测试用 SAT 断言），
+        所以「关节可以缩进连杆里，但关节之间不能互相嵌入」是几何上成立的。
+        """
+        w, h, d = self.motor_envelope
+        gap = 2.0 * self.hip_motor_clearance
+        head_w, head_t, head_h = self.head_motor_size
+        head_w += gap
+        head_t += gap
+        head_h += gap
+        # 头部两台 MG90 都以颈关节为中心对称摆（pitch 的 22.8×12.2 端面正对关节轴，
+        # 包络沿 y 居中；yaw 的机体在正下方）。yaw 挂在 head 上、会跟着 stand_neck
+        # 一起低头，所以按倾斜后的 z 半高算下沉量，保证它的顶面落在 pitch 底面之下。
+        tilt = abs(math.sin(self.stand_neck))
+        yaw_half_z = tilt * head_w / 2 + math.cos(self.stand_neck) * head_h / 2
+        neck_yaw_drop = (yaw_half_z + head_t / 2 + self.hip_motor_clearance) / math.cos(
+            self.stand_neck
+        )
+        result: list[tuple[str, str, Vec3, Vec3]] = [
+            (
+                "motor_neck_pitch",
+                "torso",
+                (head_w, head_h, head_t),  # MG90：轴沿 y；22.8×12.2 端面在 x-z 平面
+                (self.neck_pos[0], self.neck_pos[1], self.neck_pos[2]),
+            ),
+            (
+                "motor_neck_yaw",
+                "head",
+                (head_w, head_t, head_h),  # MG90：轴沿 z；22.8×12.2 端面在 x-y 平面
+                (0.0, 0.0, -neck_yaw_drop),
+            ),
+        ]
+        for side in ("L", "R"):
+            sign = 1.0 if side == "L" else -1.0
+            d_roll, d_yaw, _ = self.hip_offsets(side)
+            result += [
+                (
+                    f"motor_hip_pitch_{side}",
+                    f"hip_pitch_{side}",
+                    (w, d, h),
+                    (0.0, -sign * d / 2, 0.0),
+                ),
+                (
+                    f"motor_hip_roll_{side}",
+                    f"hip_pitch_{side}",
+                    (d, w, h),
+                    (-d / 2, d_roll[1], 0.0),
+                ),
+                (
+                    f"motor_hip_yaw_{side}",
+                    f"hip_roll_{side}",
+                    (w, h, d),
+                    (d_yaw[0], 0.0, -d / 2),
+                ),
+            ]
+        return tuple(result)
+
+    def hip_offsets(self, side: str) -> tuple[Vec3, Vec3, Vec3]:
+        """三段髋块的偏距：``(hip_roll, hip_yaw, thigh)`` 的 body 位置。
+
+        每个偏距写在**上一级关节**的坐标系里、方向沿该关节的轴；右腿按 ``y`` 镜像
+        （和 ``hip_pos`` 同一套规则），于是几何左右对称，而右腿的偏距落在它自己
+        轴的反向/正向（roll 轴为 −x、yaw 轴为 −z）。
+        """
+        sign = 1.0 if side == "L" else -1.0
+
+        def mirror(offset: Vec3) -> Vec3:
+            return (offset[0], sign * offset[1], offset[2])
+
+        return (
+            mirror(self.hip_roll_offset),
+            mirror(self.hip_yaw_offset),
+            mirror(self.thigh_offset),
+        )
 
     # ------------------------------------------------------------------
     # 规模
@@ -338,8 +481,8 @@ class DinoSpec:
 
     @property
     def n_bodies(self) -> int:
-        """躯干 1 + 头 1 + 臂 2 + 每腿 3 ×2 + 尾 4。"""
-        return 1 + 1 + 2 + 2 * 3 + 4
+        """躯干 1 + 头 1 + 臂 2 + 每腿 6（髋 3 块 + 大腿 + 小腿 + 足）×2 + 尾 4。"""
+        return 1 + 1 + 2 + 2 * 6 + 4
 
     @property
     def body_geoms(self) -> tuple[tuple[str, Vec3, float], ...]:
@@ -349,16 +492,19 @@ class DinoSpec:
             ("head", self.head_size, self.density),
             ("arm", self.arm_size, self.density),
             ("arm", self.arm_size, self.density),
-            ("thigh", self.thigh_size, self.density),
-            ("thigh", self.thigh_size, self.density),
-            ("shank", self.shank_size, self.density),
-            ("shank", self.shank_size, self.density),
-            ("foot", self.foot_size, self.density),
-            ("foot", self.foot_size, self.density),
-            ("toe", self.toe_size, self.density),
-            ("toe", self.toe_size, self.density),
-            ("toe", self.toe_size, self.density),
-            ("toe", self.toe_size, self.density),
+        ]
+        for _ in ("L", "R"):
+            geoms += [
+                ("hip_pitch", self.hip_pitch_size, self.density),
+                ("hip_roll", self.hip_roll_size, self.density),
+                ("hip_yaw", self.hip_yaw_size, self.density),
+                ("thigh", self.thigh_size, self.density),
+                ("shank", self.shank_size, self.density),
+                ("foot", self.foot_size, self.density),
+                ("toe", self.toe_size, self.density),
+                ("toe", self.toe_size, self.density),
+            ]
+        geoms += [
             ("tail_1", self.tail1_size, self.density),
             ("tail_2", self.tail2_size, self.density),
             ("tail_3", self.tail3_size, self.density),
@@ -396,7 +542,7 @@ class DinoSpec:
 
 
 # ----------------------------------------------------------------------
-# 默认机型：约 0.31 m 高、约 2.0 kg 的桌面恐龙
+# 默认机型：约 0.23 m 高、约 2.2 kg（实心 PLA 体积）的桌面小恐龙
 # ----------------------------------------------------------------------
 DEFAULT_DINO_SPEC = DinoSpec()
 
@@ -451,24 +597,35 @@ def _corners(center, size: Vec3, rot: np.ndarray) -> np.ndarray:
 
 
 def leg_boxes(
-    spec: DinoSpec, side: str, hip: float, knee: float, ankle: float
+    spec: DinoSpec, side: str, hip: float, knee: float, foot_pitch: float | None = None
 ) -> list[tuple[np.ndarray, Vec3, np.ndarray]]:
     """单腿 FK：返回足 box 与两个前趾的 ``(中心, 尺寸, 旋转)``，均在躯干坐标系。
 
-    只算矢状面内的三个 pitch 关节。站姿里髋内外翻 / 脚尖 yaw 的站姿角都是 0，
-    在这里（用来反解站立高度）等价于单位旋转，所以不需要展开三维链路。
+    只算矢状面内的 pitch 部分（髋 pitch → 膝 pitch → 足部**安装角**）。站姿里
+    髋内外翻 / 脚尖 yaw 的站姿角都是 0，踝是 roll（站姿 0），在这里都等价于单位
+    旋转；但髋部三段的**偏距**要逐级累加（每段都写在上一级旋转后的坐标系里），
+    否则站姿高度会算错。
     """
     sign = 1.0 if side == "L" else -1.0
+    if foot_pitch is None:
+        foot_pitch = spec.foot_mount_pitch
+
     rot = _rot_pitch(hip)
     p = np.array(
         (spec.hip_pos[0], sign * spec.hip_pos[1], spec.hip_pos[2]), dtype=float
     )
 
+    # 三段髋块：roll body → yaw body → thigh body，偏距逐级在旋转后的坐标系里累加
+    d_roll, d_yaw, d_thigh = spec.hip_offsets(side)
+    p = p + rot @ np.asarray(d_roll, dtype=float)
+    p = p + rot @ np.asarray(d_yaw, dtype=float)
+    p = p + rot @ np.asarray(d_thigh, dtype=float)
+
     p = p + rot @ np.array((0.0, 0.0, -spec.thigh_len))
     rot = rot @ _rot_pitch(knee)
 
     p = p + rot @ np.array((0.0, 0.0, -spec.shank_len))
-    rot = rot @ _rot_pitch(ankle)
+    rot = rot @ _rot_pitch(foot_pitch)
 
     foot_center = p + rot @ np.asarray(spec.foot_center, dtype=float)
     toe_center = np.asarray(spec.toe_center, dtype=float)
@@ -482,12 +639,12 @@ def leg_boxes(
 
 
 def foot_contact_corners(
-    spec: DinoSpec, side: str, hip: float, knee: float, ankle: float
+    spec: DinoSpec, side: str, hip: float, knee: float, foot_pitch: float | None = None
 ) -> np.ndarray:
     """足 box + 两个前趾的全部顶点（躯干坐标系），形状 ``(24, 3)``。"""
     corners = [
         _corners(center, size, rot)
-        for center, size, rot in leg_boxes(spec, side, hip, knee, ankle)
+        for center, size, rot in leg_boxes(spec, side, hip, knee, foot_pitch)
     ]
     return np.vstack(corners)
 
@@ -497,13 +654,13 @@ def sole_lowest_z(
     side: str,
     hip: float | None = None,
     knee: float | None = None,
-    ankle: float | None = None,
+    foot_pitch: float | None = None,
 ) -> float:
     """足部最低点相对基座原点的高度（已含基座俯仰，未含基座高度）。"""
     hip = spec.stand_hip if hip is None else hip
     knee = spec.stand_knee if knee is None else knee
-    ankle = spec.stand_ankle if ankle is None else ankle
-    corners = foot_contact_corners(spec, side, hip, knee, ankle)
+    foot_pitch = spec.foot_mount_pitch if foot_pitch is None else foot_pitch
+    corners = foot_contact_corners(spec, side, hip, knee, foot_pitch)
     world = corners @ _rot_pitch(spec.base_pitch).T
     return float(world[:, 2].min())
 
@@ -594,14 +751,18 @@ def _geom_attributes(
     contype: int,
     conaffinity: int,
     friction: str = "0.9 0.02 0.001",
+    density: float | None = None,
 ) -> dict[str, str]:
-    """一个 box geom 的属性表（碰撞掩码规则与双足模型一致）。"""
+    """一个 box geom 的属性表（碰撞掩码规则与双足模型一致）。
+
+    ``density=None`` 用整机材料密度；电机包络这类**只做视觉**的元素传 0。
+    """
     return {
         "name": name,
         "type": "box",
         "size": vec(half(size)),
         "pos": vec(pos),
-        "density": fnum(spec.density),
+        "density": fnum(spec.density if density is None else density),
         "rgba": rgba,
         "friction": friction,
         "contype": str(contype),
@@ -682,31 +843,136 @@ def _add_joint(
         ET.SubElement(body, "geom", cap)
 
 
-def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
-    """挂一条腿：thigh → shank → foot（foot 上再挂两个前趾）。
+def _plate_pos(offset: Vec3, size: Vec3, axis: int) -> Vec3:
+    """安装板位置：贴着本关节、沿偏距方向伸出板厚的一半（板厚 = ``size[axis]``）。"""
+    length = math.sqrt(sum(value * value for value in offset))
+    if length == 0.0:
+        return (0.0, 0.0, 0.0)
+    half_thickness = size[axis] / 2.0
+    return (
+        offset[0] / length * half_thickness,
+        offset[1] / length * half_thickness,
+        offset[2] / length * half_thickness,
+    )
 
-    thigh body 上有三个关节，按「主髋 pitch → 内外翻 roll → 脚尖 yaw」的顺序；
-    body 的 ``quat`` 烘的是这三个关节的站姿旋转，所以 qpos 全 0 时这条腿正好
-    是标称站姿（髋 pitch = ``stand_hip``、内外翻 = ``stand_hip_roll``、
-    脚尖 yaw = ``stand_hip_yaw``）。
+
+def _add_motor(
+    body: ET.Element, name: str, size: Vec3, pos: Vec3, spec: DinoSpec
+) -> None:
+    """电机包络：只做视觉，零密度、无碰撞（缩在连杆里，但彼此不相交）。"""
+    ET.SubElement(
+        body,
+        "geom",
+        _geom_attributes(
+            name, size, pos, spec, _MOTOR, contype=0, conaffinity=0, density=0.0
+        ),
+    )
+
+
+def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
+    """挂一条腿：三段髋安装板 → thigh → shank → foot（foot 上再挂两个前趾）。
+
+    髋部的三个关节**各自一个 body、各自一块安装板**，按「主髋 pitch → 内外翻
+    roll → 脚尖 yaw」串联；每段的原点相对上一关节沿其轴偏出 ``hip_*_offset``
+    （默认 20 mm）。安装板只有 10 mm 厚、端面 20 × 34，贴着各自的关节。
+
+    **三台电机的包络由** :meth:`DinoSpec.joint_motors` **给出**：机体缩进上一级
+    连杆（pitch 进躯干、roll 进 pitch 板、yaw 进 roll 板），但三个包络两两不相交。
+
+    每个 body 的 ``quat`` 烘的是它自己那个关节的站姿旋转（roll / yaw 站姿为 0 →
+    不写 quat），所以 qpos 全 0 时这条腿正好是标称站姿。踝是 roll 关节，
+    脚掌的俯仰由 ``foot_mount_pitch`` 这个固定安装角提供（烘在 foot body 的 quat 里）。
     """
     hip = (spec.hip_pos[0], sign * spec.hip_pos[1], spec.hip_pos[2])
-    thigh = ET.SubElement(
+    d_roll, d_yaw, d_thigh = spec.hip_offsets(side)
+    motors = {
+        name: (size, pos)
+        for name, body_key, size, pos in spec.joint_motors()
+        if body_key.endswith(f"_{side}")
+    }
+
+    # ---- ① 主髋 pitch ----
+    pitch_body = ET.SubElement(
         torso,
         "body",
         {
-            "name": f"thigh_{side}",
+            "name": f"hip_pitch_{side}",
             "pos": vec(hip),
-            "quat": _body_quat(
-                (spec.hip.axis_for(side), spec.stand_hip),
-                (spec.hip_roll.axis_for(side), spec.stand_hip_roll),
-                (spec.hip_yaw.axis_for(side), spec.stand_hip_yaw),
-            ),
+            "quat": _body_quat((spec.hip.axis_for(side), spec.stand_hip)),
         },
     )
-    _add_joint(thigh, spec.hip, side, spec)
-    _add_joint(thigh, spec.hip_roll, side, spec)
-    _add_joint(thigh, spec.hip_yaw, side, spec)
+    _add_joint(pitch_body, spec.hip, side, spec)
+    ET.SubElement(
+        pitch_body,
+        "geom",
+        _geom_attributes(
+            f"hip_pitch_block_{side}",
+            spec.hip_pitch_size,
+            _plate_pos(d_roll, spec.hip_pitch_size, 1),
+            spec,
+            _GREY,
+            contype=2,
+            conaffinity=1,
+        ),
+    )
+    _add_motor(
+        pitch_body, f"motor_hip_pitch_{side}", *motors[f"motor_hip_pitch_{side}"], spec
+    )
+    _add_motor(
+        pitch_body, f"motor_hip_roll_{side}", *motors[f"motor_hip_roll_{side}"], spec
+    )
+
+    # ---- ② 内外翻 roll ----
+    roll_body = ET.SubElement(
+        pitch_body,
+        "body",
+        {"name": f"hip_roll_{side}", "pos": vec(d_roll)},
+    )
+    _add_joint(roll_body, spec.hip_roll, side, spec)
+    ET.SubElement(
+        roll_body,
+        "geom",
+        _geom_attributes(
+            f"hip_roll_block_{side}",
+            spec.hip_roll_size,
+            _plate_pos(d_yaw, spec.hip_roll_size, 0),
+            spec,
+            _GREY,
+            contype=2,
+            conaffinity=1,
+        ),
+    )
+
+    # ---- ③ 脚尖偏航 yaw ----
+    yaw_body = ET.SubElement(
+        roll_body,
+        "body",
+        {"name": f"hip_yaw_{side}", "pos": vec(d_yaw)},
+    )
+    _add_joint(yaw_body, spec.hip_yaw, side, spec)
+    _add_motor(
+        roll_body, f"motor_hip_yaw_{side}", *motors[f"motor_hip_yaw_{side}"], spec
+    )
+    ET.SubElement(
+        yaw_body,
+        "geom",
+        _geom_attributes(
+            f"hip_yaw_block_{side}",
+            spec.hip_yaw_size,
+            _plate_pos(d_thigh, spec.hip_yaw_size, 2),
+            spec,
+            _GREY,
+            contype=2,
+            conaffinity=1,
+        ),
+    )
+
+    # ---- ④ 大腿（无关节）----
+    thigh = ET.SubElement(
+        yaw_body,
+        "body",
+        {"name": f"thigh_{side}", "pos": vec(d_thigh)},
+    )
     ET.SubElement(
         thigh,
         "geom",
@@ -751,7 +1017,7 @@ def _add_leg(torso: ET.Element, spec: DinoSpec, side: str, sign: float) -> None:
         {
             "name": f"foot_{side}",
             "pos": vec((0.0, 0.0, -spec.shank_len)),
-            "quat": _body_quat((spec.ankle.axis_for(side), spec.stand_ankle)),
+            "quat": _body_quat((PITCH, spec.foot_mount_pitch)),
         },
     )
     _add_joint(foot, spec.ankle, side, spec)
@@ -847,6 +1113,12 @@ def build_dino(spec: DinoSpec = DEFAULT_DINO_SPEC) -> ET.Element:
             conaffinity=1,
         ),
     )
+    # 颈部两台的电机包络：pitch 缩进躯干、yaw 缩进 head 下方，互不相交
+    for name, body_key, size, pos in spec.joint_motors():
+        if body_key == "torso":
+            _add_motor(torso, name, size, pos, spec)
+        elif body_key == "head":
+            _add_motor(head, name, size, pos, spec)
     # ---- 头部相机 cam_head：挂在 head body 上，随颈 pitch / yaw 一起转 ----
     ET.SubElement(
         head,
@@ -1020,16 +1292,28 @@ def build_dino_scene(
 
     除了通用场景自带的 ``front`` / ``iso`` 机位，再补一个 ``ref`` 机位：
     与参考图接近的右前上方 3/4 视角（远距离 + 窄视场，接近正交投影），
-    方便出图和"模型 vs 参考图"的对照。
+    方便出图和"模型 vs 参考图"的对照。三个机位都按整机高度等比缩放
+    （基准是 0.337 m 高的上一版），换尺寸后机器人仍占同样画面比例。
     """
+    height = head_top_z(spec)
     root = build_scene_for(
         "dino.xml",
         f"{spec.name}_scene",
-        statistic_center="0 0 0.17",
-        statistic_extent="0.5",
+        statistic_center=vec((0.0, 0.0, 0.5 * height)),
+        statistic_extent=fnum(1.48 * height),
     )
     world = root.find("worldbody")
     if world is not None:
+        # 机位位置按高度等比（括号里是 0.337 m 基准机型上的原值）
+        camera_positions = {
+            "front": (1.78 * height, 0.0, 0.89 * height),  # (0.60, 0, 0.30)
+            "iso": (1.34 * height, -1.34 * height, 0.89 * height),  # (0.45, -0.45, 0.30)
+            "ref": (3.26 * height, 3.07 * height, 1.46 * height),  # (1.10, 1.035, 0.492)
+        }
+        for name, pos in camera_positions.items():
+            camera = world.find(f"camera[@name='{name}']")
+            if camera is not None:
+                camera.set("pos", vec(pos))
         # 围墙尺寸由环境参数统一控制，后面想改场地大小时不需要再手算四面墙。
         for name, pos, size in env_spec.wall_geoms:
             ET.SubElement(
@@ -1051,7 +1335,7 @@ def build_dino_scene(
             "camera",
             {
                 "name": "ref",
-                "pos": "1.1 1.035 0.492",
+                "pos": vec(camera_positions["ref"]),
                 "xyaxes": "-0.682 0.731 0 -0.152 -0.142 0.978",
                 "fovy": "18",
             },
@@ -1219,11 +1503,11 @@ def verify_dino_static(
             if abs(z - expected) > 1e-4:
                 report.errors.append(f"stand 基座高度 {z:.6f} 与运动学解 {expected:.6f} 不符")
 
-    # 接触件（足 + 前趾）1/1；关节轴承外壳只做视觉 0/0；其余连杆 2/1
+    # 接触件（足 + 前趾）1/1；轴承外壳 / 电机包络只做视觉 0/0；其余连杆 2/1
     for geom in robot_root.findall(".//geom"):
         name = geom.get("name", "")
         mask = (geom.get("contype"), geom.get("conaffinity"))
-        if name.startswith("cap_"):
+        if name.startswith(("cap_", "motor_")):
             expected = ("0", "0")
         elif name.startswith("foot_geom_") or name.startswith("toe_geom_"):
             expected = ("1", "1")
